@@ -65,9 +65,12 @@ if [[ $PURGE -eq 1 ]]; then
   rm -f  "$ROOT_DIR/nohup.out" || true
   # Python bytecode caches within repo
   find "$ROOT_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
-  # Honor env-defined HF caches
-  for d in "$HF_HOME" "$TRANSFORMERS_CACHE" "$HUGGINGFACE_HUB_CACHE"; do
-    if [ -n "${d:-}" ] && [ -d "$d" ]; then
+  # Honor env-defined HF caches (avoid -u errors for unset vars)
+  HF_HOME_DIR="${HF_HOME:-}"
+  TRANSFORMERS_CACHE_DIR="${TRANSFORMERS_CACHE:-}"
+  HUGGINGFACE_HUB_CACHE_DIR="${HUGGINGFACE_HUB_CACHE:-}"
+  for d in "$HF_HOME_DIR" "$TRANSFORMERS_CACHE_DIR" "$HUGGINGFACE_HUB_CACHE_DIR"; do
+    if [ -n "$d" ] && [ -d "$d" ]; then
       echo "[purge] Removing cache: $d"
       rm -rf "$d" || true
     fi
