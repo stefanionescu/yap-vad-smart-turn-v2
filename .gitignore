@@ -1,0 +1,34 @@
+# Environment and cache
+venv/
+.env
+cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.env
+.venv
+
+# Logs and output files
+logs/
+*.log
+*.zip
+
+# OS specific files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Test files
+*.wav
