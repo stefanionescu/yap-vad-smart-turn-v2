@@ -17,9 +17,9 @@ export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:T
 
 PORT=8000
 
-echo "[start] Launching Smart Turn server on 0.0.0.0:${PORT}"
+echo "[start] Launching Smart Turn server on 127.0.0.1:${PORT}"
 exec uvicorn src.server:app \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port "$PORT" \
   --workers 1 \
   --loop uvloop \

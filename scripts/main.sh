@@ -41,7 +41,7 @@ echo $! > "$RUN_DIR/tail.pid"
 
 # Wait for readiness
 echo -n "[main] Waiting for health on http://127.0.0.1:8000/health"
-ATTEMPTS=60
+ATTEMPTS=120
 READY_VIA=""
 for i in $(seq 1 $ATTEMPTS); do
   if python - <<'PY'
@@ -72,7 +72,28 @@ done
 
 # If we only detected file readiness, wait a bit more for the socket to bind
 if [ "$READY_VIA" = "file" ]; then
-  sleep 2
+  # Keep probing HTTP until the socket is live (extra window)
+  EXTRA=60
+  for i in $(seq 1 $EXTRA); do
+    if python - <<'PY'
+import urllib.request
+try:
+    with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=1) as r:
+        import sys; sys.exit(0 if r.status==200 else 1)
+except Exception:
+    import sys; sys.exit(1)
+PY
+    then
+      echo "[main] HTTP health is up after file readiness"
+      break
+    else
+      sleep 1
+    fi
+    if [[ $i -eq $EXTRA ]]; then
+      echo "[main] HTTP never came up after readiness; check logs"
+      exit 3
+    fi
+  done
 fi
 
 if [[ $DO_WARMUP -eq 1 ]]; then

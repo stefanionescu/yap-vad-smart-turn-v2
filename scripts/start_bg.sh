@@ -29,7 +29,7 @@ PORT=8000
 
 echo "[start_bg] Launching on port ${PORT}"
 nohup uvicorn src.server:app \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   --port "$PORT" \
   --workers 1 \
   --loop uvloop \
