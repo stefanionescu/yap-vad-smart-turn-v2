@@ -6,15 +6,18 @@ ROOT_DIR=$(dirname "$SCRIPT_DIR")
 PID_FILE="$ROOT_DIR/.run/server.pid"
 
 PURGE=0
+DEEP=0
 
 usage() {
-  echo "Usage: $0 [--purge]"
+  echo "Usage: $0 [--purge] [--deep]"
   echo "  --purge  Stop server and remove venv, caches (.hf), logs, run files, downloaded models, and pip caches"
+  echo "  --deep   Also clean system-level caches (apt lists/archives) if available"
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --purge|-p) PURGE=1; shift ;;
+    --deep|-d) DEEP=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1"; usage; exit 2 ;;
   esac
@@ -55,16 +58,39 @@ fi
 echo "[stop] Service stopped"
 
 if [[ $PURGE -eq 1 ]]; then
-  echo "[purge] Removing venv, caches, logs, and model weights"
-  rm -rf "$ROOT_DIR/venv" || true
+  echo "[purge] Removing venvs, caches, logs, and model weights"
+  rm -rf "$ROOT_DIR/venv" "$ROOT_DIR/.venv" || true
   rm -rf "$ROOT_DIR/.hf" || true
-  rm -rf "$ROOT_DIR/logs" || true
-  rm -rf "$ROOT_DIR/.run" || true
-  # Python bytecode caches
+  rm -rf "$ROOT_DIR/logs" "$ROOT_DIR/.run" || true
+  rm -f  "$ROOT_DIR/nohup.out" || true
+  # Python bytecode caches within repo
   find "$ROOT_DIR" -type d -name "__pycache__" -prune -exec rm -rf {} + || true
-  # Optional: user pip/hf caches (best-effort)
+  # Honor env-defined HF caches
+  for d in "$HF_HOME" "$TRANSFORMERS_CACHE" "$HUGGINGFACE_HUB_CACHE"; do
+    if [ -n "${d:-}" ] && [ -d "$d" ]; then
+      echo "[purge] Removing cache: $d"
+      rm -rf "$d" || true
+    fi
+  done
+  # User-level caches (best-effort)
   rm -rf "$HOME/.cache/pip" || true
-  rm -rf "$HOME/.cache/huggingface" || true
+  rm -rf "$HOME/.cache/huggingface" "$HOME/.cache/huggingface_hub" || true
+  rm -rf "$HOME/.cache/torch" || true
+  # XDG cache
+  if [ -n "${XDG_CACHE_HOME:-}" ]; then
+    rm -rf "$XDG_CACHE_HOME/huggingface" || true
+    rm -rf "$XDG_CACHE_HOME/torch" || true
+  fi
+  # Historical model dir from earlier runs (if exists)
+  [ -d "/models/hf" ] && rm -rf "/models/hf" || true
+  echo "[purge] Repo disk usage now:"; du -sh "$ROOT_DIR" 2>/dev/null | awk '{print $1 " used in repo"}' || true
+  if [[ $DEEP -eq 1 ]]; then
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "[deep] Cleaning apt caches"
+      apt-get clean || true
+      rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/* || true
+    fi
+  fi
   echo "[purge] Done"
 fi
 
