@@ -9,6 +9,7 @@ import torch
 from fastapi import FastAPI, Request, HTTPException
 from loguru import logger
 from transformers import AutoProcessor, AutoModelForAudioClassification
+from pathlib import Path
 
 from .constants import (
     SAMPLE_RATE,
@@ -220,6 +221,14 @@ async def _batcher():
 async def _on_start():
     asyncio.create_task(_batcher())
     logger.info(f"Smart Turn v2 server ready on {DEVICE} | buckets={BATCH_BUCKETS} window_ms={MICRO_BATCH_WINDOW_MS}")
+    # Write readiness file for orchestrators that prefer file-based health
+    try:
+        root = Path(__file__).resolve().parents[1]
+        run_dir = root / ".run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / "ready").write_text("ok", encoding="utf-8")
+    except Exception as e:
+        logger.warning(f"Failed to write readiness file: {e}")
 
 
 @app.get("/health")

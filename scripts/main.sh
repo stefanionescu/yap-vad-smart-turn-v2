@@ -55,6 +55,11 @@ PY
     echo " ✔"
     break
   else
+    # Fallback to file-based readiness flag written by server startup
+    if [ -f "$RUN_DIR/ready" ]; then
+      echo " ✔ (file)"
+      break
+    fi
     echo -n "."; sleep 1
   fi
   if [[ $i -eq $ATTEMPTS ]]; then
