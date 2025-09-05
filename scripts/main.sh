@@ -40,61 +40,26 @@ bash "$SCRIPT_DIR/tail_bg_logs.sh" &
 echo $! > "$RUN_DIR/tail.pid"
 
 # Wait for readiness
-echo -n "[main] Waiting for health on http://127.0.0.1:8000/health"
-ATTEMPTS=120
-READY_VIA=""
-for i in $(seq 1 $ATTEMPTS); do
-  if python - <<'PY'
-import urllib.request
-try:
-    with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=1) as r:
-        import sys; sys.exit(0 if r.status==200 else 1)
-except Exception:
-    import sys; sys.exit(1)
-PY
-  then
+# Wait for TCP listen, then HTTP health
+echo -n "[main] Waiting for TCP 0.0.0.0:8000 to listen"
+for i in $(seq 1 120); do
+  if ss -lnt | grep -q ':8000 '; then
     echo " ✔"
-    READY_VIA="http"
     break
-  else
-    # Fallback to file-based readiness flag written by server startup
-    if [ -f "$RUN_DIR/ready" ]; then
-      echo " ✔ (file)"
-      READY_VIA="file"
-      break
-    fi
-    echo -n "."; sleep 1
   fi
-  if [[ $i -eq $ATTEMPTS ]]; then
-    echo "\n[main] Server did not become ready in time"; exit 3
-  fi
+  sleep 1
+  [ $i -eq 120 ] && { echo " ✖ timed out"; exit 3; }
 done
 
-# If we only detected file readiness, wait a bit more for the socket to bind
-if [ "$READY_VIA" = "file" ]; then
-  # Keep probing HTTP until the socket is live (extra window)
-  EXTRA=60
-  for i in $(seq 1 $EXTRA); do
-    if python - <<'PY'
-import urllib.request
-try:
-    with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=1) as r:
-        import sys; sys.exit(0 if r.status==200 else 1)
-except Exception:
-    import sys; sys.exit(1)
-PY
-    then
-      echo "[main] HTTP health is up after file readiness"
-      break
-    else
-      sleep 1
-    fi
-    if [[ $i -eq $EXTRA ]]; then
-      echo "[main] HTTP never came up after readiness; check logs"
-      exit 3
-    fi
-  done
-fi
+echo -n "[main] Waiting for HTTP health"
+for i in $(seq 1 120); do
+  if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+    echo " ✔"
+    break
+  fi
+  sleep 1
+  [ $i -eq 120 ] && { echo " ✖ timed out"; exit 3; }
+done
 
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"

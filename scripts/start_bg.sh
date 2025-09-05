@@ -29,11 +29,12 @@ PORT=8000
 
 echo "[start_bg] Launching on port ${PORT}"
 nohup uvicorn src.server:app \
-  --host 127.0.0.1 \
+  --host 0.0.0.0 \
   --port "$PORT" \
   --workers 1 \
   --loop uvloop \
   --http httptools \
+  --log-level debug \
   > "$LOG_DIR/server.log" 2>&1 &
 
 echo $! > "$PID_FILE"
