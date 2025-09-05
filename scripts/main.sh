@@ -42,6 +42,7 @@ echo $! > "$RUN_DIR/tail.pid"
 # Wait for readiness
 echo -n "[main] Waiting for health on http://127.0.0.1:8000/health"
 ATTEMPTS=60
+READY_VIA=""
 for i in $(seq 1 $ATTEMPTS); do
   if python - <<'PY'
 import urllib.request
@@ -53,11 +54,13 @@ except Exception:
 PY
   then
     echo " ✔"
+    READY_VIA="http"
     break
   else
     # Fallback to file-based readiness flag written by server startup
     if [ -f "$RUN_DIR/ready" ]; then
       echo " ✔ (file)"
+      READY_VIA="file"
       break
     fi
     echo -n "."; sleep 1
@@ -66,6 +69,11 @@ PY
     echo "\n[main] Server did not become ready in time"; exit 3
   fi
 done
+
+# If we only detected file readiness, wait a bit more for the socket to bind
+if [ "$READY_VIA" = "file" ]; then
+  sleep 2
+fi
 
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"
