@@ -6,6 +6,8 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 cd "$ROOT_DIR"
+RUN_DIR="$ROOT_DIR/.run"
+mkdir -p "$RUN_DIR"
 
 DO_WARMUP=1
 SAMPLE="mid.wav"
@@ -33,17 +35,18 @@ bash "$SCRIPT_DIR/start_bg.sh"
 
 # Wait a moment before tailing logs to ensure log file is created
 sleep 2
-# Start tailing logs (in background) so we can monitor startup
+# Start tailing logs (in background) so we can monitor startup and record PID
 bash "$SCRIPT_DIR/tail_bg_logs.sh" &
+echo $! > "$RUN_DIR/tail.pid"
 
 # Wait for readiness
-echo -n "[main] Waiting for health on http://localhost:8000/health"
+echo -n "[main] Waiting for health on http://127.0.0.1:8000/health"
 ATTEMPTS=60
 for i in $(seq 1 $ATTEMPTS); do
   if python - <<'PY'
 import urllib.request
 try:
-    with urllib.request.urlopen('http://localhost:8000/health', timeout=1) as r:
+    with urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=1) as r:
         import sys; sys.exit(0 if r.status==200 else 1)
 except Exception:
     import sys; sys.exit(1)

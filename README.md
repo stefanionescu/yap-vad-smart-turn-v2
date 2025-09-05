@@ -66,7 +66,15 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 
 ## Tests
 
-Ensure venv is active (`source venv/bin/activate`) or run after `scripts/main.sh`.
+Ensure venv is active or run after `scripts/main.sh`.
+
+- If you already ran `bash scripts/main.sh`, you're set (venv and deps are installed).
+- Otherwise, do:
+
+```bash
+bash scripts/setup.sh
+source venv/bin/activate
+```
 
 - Warmup (single request, pads/truncates to `--seconds`):
 

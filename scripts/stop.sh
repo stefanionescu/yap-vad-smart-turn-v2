@@ -4,6 +4,7 @@ set -euo pipefail
 SCRIPT_DIR=$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(dirname "$SCRIPT_DIR")
 PID_FILE="$ROOT_DIR/.run/server.pid"
+TAIL_PID_FILE="$ROOT_DIR/.run/tail.pid"
 
 PURGE=0
 DEEP=0
@@ -47,6 +48,16 @@ if [ -f "$PID_FILE" ]; then
   rm -f "$PID_FILE"
 else
   echo "[stop] No PID file at $PID_FILE"
+fi
+
+# Stop tailer if running
+if [ -f "$TAIL_PID_FILE" ]; then
+  TAILPID="$(cat "$TAIL_PID_FILE" || echo)"
+  if [ -n "$TAILPID" ] && kill -0 "$TAILPID" 2>/dev/null; then
+    echo "[stop] Stopping tail logs PID $TAILPID"
+    kill "$TAILPID" || true
+  fi
+  rm -f "$TAIL_PID_FILE"
 fi
 
 # Fallback: try pkill by pattern (in case PID file lost)
