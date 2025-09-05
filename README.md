@@ -1,4 +1,4 @@
-## Yap Smart Turn v2 — L40S CUDA micro-batched server (Pipecat wire format)
+## Yap Smart Turn v2
 
 FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching on NVIDIA L40S. Same wire format as Pipecat's `HttpSmartTurnAnalyzer`: POST `/raw` with `np.save` bytes → JSON `{prediction, probability, metrics}`.
 
@@ -10,42 +10,21 @@ FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching
 
 ---
 
-## Install
+## One command install & run
 
 ```bash
-bash scripts/setup.sh
+bash scripts/main.sh
 ```
 
-## Start
+What it does:
+- Installs/updates venv and Python deps
+- Prefetches the model weights
+- Creates a default sample `samples/mid.wav`
+- Starts the server in the background on port 8000
+- Tails logs (brief delay)
+- Sends a one-shot warmup using `samples/mid.wav`
 
-- Foreground (fixed port 8000):
-
-```bash
-export AUTH_KEY=dev
-export BATCH_BUCKETS=16,32,64
-export MICRO_BATCH_WINDOW_MS=2
-export DTYPE=bfloat16
-export THRESHOLD=0.5
-export TORCH_COMPILE=1   # optional
-export CUDA_GRAPHS=0     # optional
-bash scripts/start.sh
-```
-
-- Background + logs:
-
-```bash
-bash scripts/start_bg.sh
-bash scripts/tail_bg_logs.sh
-```
-
-- One-shot orchestration (always runs setup → start_bg → wait → warmup → optional tail):
-
-```bash
-bash scripts/main.sh --sample mid.wav --seconds 8 --tail
-# Options: --no-warmup, --sample <file>, --seconds <n>, --tail
-```
-
-Server listens on port `8000`. Health: `GET /health`.
+Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 
 ---
 

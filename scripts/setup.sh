@@ -50,6 +50,23 @@ snapshot_download(mid)
 print("[setup] Done.")
 PY
 
+echo "[setup] Ensuring default sample at samples/mid.wav"
+python - <<'PY'
+import os, torch, torchaudio
+root = os.path.dirname(os.path.dirname(__file__))
+samples_dir = os.path.join(root, 'samples')
+os.makedirs(samples_dir, exist_ok=True)
+out = os.path.join(samples_dir, 'mid.wav')
+if not os.path.exists(out):
+    sr = 16000
+    sec = 8
+    wav = torch.zeros(1, sr*sec, dtype=torch.float32)
+    torchaudio.save(out, wav, sample_rate=sr, format='wav')
+    print(f"[setup] Wrote {out}")
+else:
+    print(f"[setup] Sample exists: {out}")
+PY
+
 echo "[setup] Complete. Activate with: source venv/bin/activate"
 
 #!/usr/bin/env bash
