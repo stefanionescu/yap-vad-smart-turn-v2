@@ -204,6 +204,7 @@ def _auth_ok(request: Request) -> bool:
 
 async def _batcher():
     await asyncio.sleep(0)  # let uvicorn bind
+    await _ensure_compiled()
 
     while True:
         await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
@@ -218,7 +219,6 @@ async def _batcher():
         bucket = min([b for b in BATCH_BUCKETS if b >= depth] or [BATCH_BUCKETS[-1]])
         logger.debug(f"batcher: depth={depth} bucket={bucket} queue_empty={QUEUE.empty()}")
 
-        # Build (B, T)
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
             batch = torch.from_numpy(np_stack)
@@ -227,22 +227,20 @@ async def _batcher():
             else:
                 batch = batch.to(DEVICE)
         except Exception as e:
-            logger.exception(f"batcher: failed to build batch: {e}")
+            logger.exception(f"batcher: failed to build batch tensor: {e}")
             now = time.perf_counter()
             for it in items:
                 if not it.fut.done():
-                    it.fut.set_result({"prediction": 0, "probability": 0.0,
-                                       "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total}})
+                    it.fut.set_result({"prediction":0,"probability":0.0,
+                        "metrics":{"inference_time":0.0,"total_time":now - it.t_start_total}})
             continue
 
-        # ensure we compiled once (no concurrent first-run)
-        await _ensure_compiled()
-
-        t0 = time.perf_counter()
+        t0_inf = time.perf_counter()
         logits = None
+
         try:
             if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-                # pad for capture size
+                # pad to bucket if needed
                 if batch.shape[0] < bucket:
                     pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
                     pad[: batch.shape[0]].copy_(batch)
@@ -251,17 +249,16 @@ async def _batcher():
                     batch_b = batch
 
                 if bucket in GRAPHS:
-                    logger.debug(f"batcher: replay graph bucket={bucket}")
                     g, logits_ref, inp = GRAPHS[bucket]
                     inp["input_values"].copy_(batch_b)
-                    g.replay()
+                    g.replay()                         # FAST PATH
                     logits = logits_ref
                 else:
-                    if bucket not in CAPTURING:
+                    # serve eager immediately; capture in background
+                    if bucket not in CAPTURING and bucket not in CAPTURED:
                         CAPTURING.add(bucket)
                         asyncio.create_task(_capture_bucket(bucket))
-                    # serve eagerly meanwhile
-                    logger.debug(f"batcher: eager forward bucket={bucket} (graph missing)")
+
                     inp = processor(
                         batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                         max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
@@ -275,7 +272,7 @@ async def _batcher():
                             out = model(**inp)
                     logits = out.logits
             else:
-                logger.debug("batcher: eager forward (no graphs)")
+                # pure eager
                 inp = processor(
                     batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                     max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
@@ -290,9 +287,7 @@ async def _batcher():
                 logits = out.logits
 
             probs = logits.detach().float().cpu().numpy().reshape(-1)[:depth]
-            t1 = time.perf_counter()
-            dt = t1 - t0
-            logger.debug(f"batcher: forward done in {dt*1000:.1f} ms")
+            t1_inf = time.perf_counter()
 
             for it, p in zip(items, probs):
                 pred = 1 if p > THRESHOLD else 0
@@ -300,26 +295,30 @@ async def _batcher():
                     it.fut.set_result({
                         "prediction": int(pred),
                         "probability": float(p),
-                        "metrics": {"inference_time": dt, "total_time": t1 - it.t_start_total},
+                        "metrics": {
+                            "inference_time": t1_inf - t0_inf,
+                            "total_time": t1_inf - it.t_start_total,
+                        },
                     })
-
         except Exception as e:
             logger.exception(f"batcher: inference failed: {e}")
             now = time.perf_counter()
             for it in items:
                 if not it.fut.done():
-                    it.fut.set_result({"prediction": 0, "probability": 0.0,
-                                       "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total}})
+                    it.fut.set_result({"prediction":0,"probability":0.0,
+                        "metrics":{"inference_time":0.0,"total_time":now - it.t_start_total}})
             continue
 
 
 @app.on_event("startup")
 async def _on_start():
-    # kick compile now
+    # compile first to avoid first-hit stall
     asyncio.create_task(_ensure_compiled())
-    # start batcher
+
+    # batcher
     asyncio.create_task(_batcher())
-    # precapture all buckets in the background (non-blocking)
+
+    # pre-capture all buckets in background
     if USE_CUDA_GRAPHS and DEVICE.type == "cuda" and CAPTURE_ALL:
         asyncio.create_task(_precapture_all_buckets())
 

@@ -17,6 +17,9 @@ export PYTHONPATH="$ROOT_DIR"
 export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8,16,32,64}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export CUDA_GRAPHS="${CUDA_GRAPHS:-1}"
+export DTYPE="${DTYPE:-bfloat16}"
+export CAPTURE_ALL="${CAPTURE_ALL:-1}"
+export CAPTURE_CONCURRENCY="${CAPTURE_CONCURRENCY:-1}"
 
 PORT=8000
 echo "[start_bg] Launching on port ${PORT}"
