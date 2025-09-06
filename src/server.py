@@ -196,14 +196,27 @@ async def _batcher():
 
             m = _ACTIVE_MODEL
             logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
-            inp = _make_inputs_gpu(batch, cast_to=(DTYPE if DTYPE != torch.float32 else None))
+            
+            # 🔥 Padding-to-bucket optimization: pad to bucket size for compiled models
+            use_compiled = USE_TORCH_COMPILE and _COMPILED_READY
+            if use_compiled and batch.shape[0] < bucket:
+                pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
+                pad[:depth].copy_(batch)
+                batch_for_model = pad
+                logger.debug(f"batcher: padded batch from {depth} to {bucket} for compiled model")
+            else:
+                batch_for_model = batch
+            
+            inp = _make_inputs_gpu(batch_for_model, cast_to=(DTYPE if DTYPE != torch.float32 else None))
             with torch.no_grad():
                 if DEVICE.type == "cuda" and DTYPE != torch.float32:
                     with torch.autocast("cuda", dtype=DTYPE):
                         out = m(**inp)
                 else:
                     out = m(**inp)
-            logits = out["logits"] if isinstance(out, dict) else out.logits
+            
+            # Slice logits back to original depth
+            logits = (out["logits"] if isinstance(out, dict) else out.logits)[:depth]
 
             probs = logits.detach().float().cpu().numpy().reshape(-1)
             t1 = time.perf_counter()
@@ -233,6 +246,9 @@ async def _batcher():
 async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
     asyncio.create_task(_batcher())
+    
+    # 🔥 Start compilation at startup so first request is also fast
+    asyncio.create_task(_compile_in_background())
 
     # mark ready file
     try:
