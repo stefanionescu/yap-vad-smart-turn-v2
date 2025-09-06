@@ -9,7 +9,7 @@ unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export OMP_NUM_THREADS=2
 export MKL_NUM_THREADS=2
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:true
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 
 exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level debug
