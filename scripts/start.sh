@@ -21,5 +21,6 @@ export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
 export DTYPE="${DTYPE:-bfloat16}"
 export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
+export LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
 
-exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --lifespan on --log-level debug
+exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --lifespan on --log-level info

@@ -15,12 +15,20 @@ except ImportError as e:
 
 from .constants import (
     SAMPLE_RATE, MAX_SECS, DTYPE, THRESHOLD,
-    MICRO_BATCH_WINDOW_MS, AUTH_KEY, MODEL_ID,
+    MICRO_BATCH_WINDOW_MS, AUTH_KEY, MODEL_ID, LOG_LEVEL,
 )
 
 # Be resilient: never crash the server if compile fails
 import torch._dynamo as dynamo
 dynamo.config.suppress_errors = True
+
+# Configure logging level
+logger.remove()  # Remove default handler
+logger.add(
+    lambda msg: print(msg, end=''),
+    level=LOG_LEVEL,
+    format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+)
 
 
 # -------- Configurable buckets (1..64 by default) ----------

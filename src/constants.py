@@ -21,5 +21,8 @@ MICRO_BATCH_WINDOW_MS = int(os.environ.get("MICRO_BATCH_WINDOW_MS", "2"))
 # Auth
 AUTH_KEY = os.environ.get("AUTH_KEY", "")
 
+# Logging
+LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
+
 
 

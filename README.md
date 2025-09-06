@@ -73,6 +73,7 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 - `MODEL_ID` (default `pipecat-ai/smart-turn-v2`).
 - `MAX_SECS` (default `16`): Maximum audio duration in seconds.
 - `PYTORCH_CUDA_ALLOC_CONF` (default `expandable_segments:True`): CUDA memory allocator.
+- `LOG_LEVEL` (default `INFO`): Logging level (`DEBUG`, `INFO`, `WARNING`, `ERROR`).
 - Port is fixed to `8000` (see `src/constants.py`).
 
 **Note**: CUDA graphs have been removed from the codebase for stability.
@@ -94,7 +95,11 @@ source venv/bin/activate
 - Warmup (single request, pads/truncates to `--seconds`):
 
 ```bash
-python3 ./test/warmup.py --sample mid.wav --seconds 8
+# Quiet mode (default - no debug logs)
+python -m test.warmup --sample mid.wav --seconds 8
+
+# With debug logs
+LOG_LEVEL=DEBUG python -m test.warmup --sample mid.wav --seconds 8
 ```
 
 - Bench (total requests and concurrency):
@@ -274,6 +279,7 @@ export CUDA_GRAPHS=0                     # CUDA graphs disabled (cleaned up)
 export DTYPE=bfloat16                    # Optimal for L40S/modern GPUs
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Better memory management
 export MICRO_BATCH_WINDOW_MS=5           # 5ms window (2-10ms range)
+export LOG_LEVEL=DEBUG                   # Enable detailed logging for production
 ```
 
 ### Performance Tuning

@@ -19,6 +19,7 @@ export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
 export DTYPE="${DTYPE:-bfloat16}"
 export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
+export LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
 
 PORT=8000
 echo "[start_bg] Launching on port ${PORT}"
@@ -29,7 +30,7 @@ nohup python -m uvicorn src.server:app \
   --port "$PORT" \
   --workers 1 \
   --lifespan on \
-  --log-level debug \
+  --log-level info \
   > "$ROOT_DIR/logs/server.log" 2>&1 &
 
 echo $! > "$ROOT_DIR/.run/server.pid"
