@@ -11,8 +11,8 @@ echo "[setup] Preparing Smart Turn v2 environment..."
 if command -v apt-get >/dev/null 2>&1; then
   echo "[setup] Updating apt cache (if available)"
   apt-get update -y || true
-  echo "[setup] Installing system libs for audio I/O (ffmpeg, libsndfile1)"
-  apt-get install -y --no-install-recommends ffmpeg libsndfile1 || true
+  echo "[setup] Installing system libs for audio I/O (libsndfile1)"
+  apt-get install -y --no-install-recommends libsndfile1 || true
 fi
 
 echo "[setup] Creating Python virtual environment at $ROOT_DIR/.venv"

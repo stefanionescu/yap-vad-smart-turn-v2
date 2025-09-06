@@ -1,11 +1,29 @@
+# Smart Turn v2 - Inference Runtime Dependencies
+# ==============================================
+
+# Core web server
 fastapi==0.114.2
-uvicorn[standard]==0.30.6
+uvicorn[standard]==0.30.6          # includes httptools, uvloop for performance
+
+# Core ML/data processing
 numpy==2.1.1
+transformers==4.48.2               # pinned to match model export version
+tokenizers==0.21.4                 # pinned for determinism
 huggingface_hub==0.24.6
-transformers==4.48.2
-loguru==0.7.2
-aiohttp==3.9.5
-python-dotenv==1.0.1
-pyyaml==6.0.2
-tqdm==4.67.1
 safetensors==0.6.2
+
+# HTTP client for testing/warmup
+aiohttp==3.9.5
+
+# Utilities
+loguru==0.7.2                      # structured logging
+python-dotenv==1.0.1               # environment variable loading
+pyyaml==6.0.2                      # config files (if needed)
+tqdm==4.67.1                       # progress bars for model downloads
+
+# Audio processing (for sample generation in setup)
+soundfile==0.12.1                  # requires: apt-get install libsndfile1
+
+# IMPORTANT: PyTorch CUDA wheels are installed separately via setup.sh
+# DO NOT add torch/torchaudio here without --index-url as it will install CPU versions
+# Use: pip install --index-url https://download.pytorch.org/whl/cu124 torch==2.4.1+cu124 torchaudio==2.4.1+cu124
