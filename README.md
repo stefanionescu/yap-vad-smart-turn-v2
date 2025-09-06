@@ -89,7 +89,7 @@ Ensure venv is active or run after `scripts/main.sh`.
 
 ```bash
 bash scripts/setup.sh
-source venv/bin/activate
+source .venv/bin/activate
 ```
 
 - Warmup (single request, pads/truncates to `--seconds`):
@@ -99,7 +99,7 @@ source venv/bin/activate
 python3 ./test/warmup.py --sample mid.wav --seconds 8
 
 # With debug logs
-LOG_LEVEL=DEBUG python3 test/warmup.py --sample mid.wav --seconds 8
+LOG_LEVEL=DEBUG python3 ./test/warmup.py --sample mid.wav --seconds 8
 ```
 
 - Bench (total requests and concurrency):
