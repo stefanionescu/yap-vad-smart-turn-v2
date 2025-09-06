@@ -1,4 +1,4 @@
-import argparse, io, asyncio, numpy as np
+import argparse, io, os, asyncio, numpy as np
 import aiohttp, torch, torchaudio
 
 SR = 16000
@@ -25,7 +25,17 @@ async def main():
     ap.add_argument("--timeout", type=float, default=10)  # allow first-hit compile+capture
     args = ap.parse_args()
 
-    arr = load_first_seconds(args.sample, args.seconds)
+    # Smart path resolution: if file doesn't exist, try samples/ prefix
+    sample_path = args.sample
+    if not os.path.exists(sample_path) and not os.path.isabs(sample_path):
+        # Try samples/ prefix
+        prefixed_path = f"samples/{sample_path}"
+        if os.path.exists(prefixed_path):
+            sample_path = prefixed_path
+        else:
+            print(f"Warning: Neither '{sample_path}' nor '{prefixed_path}' found")
+
+    arr = load_first_seconds(sample_path, args.seconds)
     buf = io.BytesIO(); np.save(buf, arr)
 
     headers = {"Content-Type": "application/octet-stream"}

@@ -94,19 +94,19 @@ source venv/bin/activate
 - Warmup (single request, pads/truncates to `--seconds`):
 
 ```bash
-python -m test.warmup --sample mid.wav --seconds 8
+python3 ./test/warmup.py --sample mid.wav --seconds 8
 ```
 
 - Bench (total requests and concurrency):
 
 ```bash
-python -m test.bench --sample mid.wav --seconds 8 --requests 256 --concurrency 64
+python3 test/bench --sample mid.wav --seconds 8 --requests 256 --concurrency 64
 ```
 
 - Client (reads `.env` for `RUNPOD_TCP_HOST`, `RUNPOD_TCP_PORT`, `AUTH_KEY`):
 
 ```bash
-python -m test.client --sample mid.wav --seconds 8
+python3 test/client --sample mid.wav --seconds 8
 ```
 
 `.env` example (repo root):
