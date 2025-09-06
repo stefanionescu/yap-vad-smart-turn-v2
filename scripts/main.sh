@@ -52,7 +52,7 @@ done
 
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"
-  source venv/bin/activate
+  source .venv/bin/activate
   python -m test.warmup --sample "$SAMPLE" --seconds "$SECONDS_PAD"
 fi
 

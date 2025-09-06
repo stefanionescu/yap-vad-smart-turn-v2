@@ -8,8 +8,16 @@ import numpy as np
 import torch
 from fastapi import FastAPI, Request, HTTPException
 from loguru import logger
-from transformers import AutoProcessor, Wav2Vec2ForEndpointing
+from transformers import AutoProcessor
 from pathlib import Path
+
+# Robust import of Wav2Vec2ForEndpointing with fallback
+try:
+    # Preferred - works if top-level export is present
+    from transformers import Wav2Vec2ForEndpointing
+except Exception:
+    # Fallback - import directly from the wav2vec2 module
+    from transformers.models.wav2vec2.modeling_wav2vec2 import Wav2Vec2ForEndpointing
 
 from .constants import (
     SAMPLE_RATE,

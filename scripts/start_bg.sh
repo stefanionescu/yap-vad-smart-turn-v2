@@ -15,9 +15,10 @@ if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
   exit 0
 fi
 
-source venv/bin/activate
+source .venv/bin/activate
 
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf}"
+unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
