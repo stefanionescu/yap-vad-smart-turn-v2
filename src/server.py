@@ -39,7 +39,7 @@ except Exception:
     pass
 torch.set_float32_matmul_precision("high")
 
-MAX_SAMPLES = SAMPLE_RATE * int(os.environ.get("MAX_SECS", str(MAX_SECS)))
+MAX_SAMPLES = SAMPLE_RATE * int(float(os.environ.get("MAX_SECS", str(MAX_SECS))))
 
 # -------- State ----------
 # We start with an eager model to guarantee the first request returns.
