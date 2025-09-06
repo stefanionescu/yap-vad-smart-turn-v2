@@ -35,9 +35,9 @@ def _parse_buckets(val: str) -> list[int]:
     try:
         return [int(x) for x in val.split(",") if x.strip()]
     except Exception:
-        return [1, 2, 4, 8, 16, 32, 64]
+        return [1, 2, 4, 8]  # Default to smaller buckets to avoid OOM
 
-BATCH_BUCKETS = _parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8,16,32,64"))
+BATCH_BUCKETS = _parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8"))
 USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 USE_CUDA_GRAPHS  = os.environ.get("CUDA_GRAPHS", "1") == "1"
 CAPTURE_CONCURRENCY = int(os.environ.get("CAPTURE_CONCURRENCY", "1"))
@@ -311,7 +311,10 @@ async def _batcher():
                 if _ACTIVE_MODEL is None:
                     _build_eager_if_needed()
                     asyncio.create_task(_compile_in_background())
-                    _kickoff_all_captures()
+                
+                # Trigger capture for this specific bucket if not already captured/capturing
+                if USE_CUDA_GRAPHS and DEVICE.type == "cuda" and bucket not in CAPTURED and bucket not in CAPTURING:
+                    asyncio.create_task(_capture_bucket(bucket))
 
                 m = _ACTIVE_MODEL
                 logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
@@ -352,7 +355,7 @@ async def _batcher():
 async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
     asyncio.create_task(_batcher())
-    _kickoff_all_captures()   # kick off all bucket captures in background
+    # Note: Removed _kickoff_all_captures() - now capture on demand to save memory
 
     # mark ready file
     try:
