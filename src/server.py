@@ -1,5 +1,6 @@
 import os, io, time, asyncio
 from typing import List, Dict, Tuple
+from contextlib import contextmanager
 
 import numpy as np
 import torch
@@ -71,6 +72,16 @@ CAPTURING: set[int] = set()
 
 # Capture concurrency control (create ONCE; no races)
 _CAPTURE_SEM = asyncio.Semaphore(int(os.environ.get("CAPTURE_CONCURRENCY", "1")))
+
+@contextmanager
+def _no_empty_cache_during_capture():
+    """Torch calls empty_cache() inside the graph ctx enter; avoid allocator assert."""
+    orig = torch.cuda.empty_cache
+    try:
+        torch.cuda.empty_cache = lambda: None
+        yield
+    finally:
+        torch.cuda.empty_cache = orig
 
 # -------- Helpers ----------
 def _ensure_16k(arr: np.ndarray) -> np.ndarray:
@@ -181,15 +192,15 @@ async def _capture_bucket(bucket: int):
             if DEVICE.type == "cuda":
                 torch.cuda.synchronize()
 
-            # capture on a private stream
-            capture_stream = torch.cuda.Stream()
+            # dedicate a private stream for capture
+            cap_stream = torch.cuda.Stream()
             g = torch.cuda.CUDAGraph()
 
-            # make sure the capture stream sees all prior work
-            capture_stream.wait_stream(torch.cuda.current_stream())
+            # ensure ordering
+            cap_stream.wait_stream(torch.cuda.current_stream())
 
-            with torch.cuda.stream(capture_stream):
-                # one more warm call on the capture stream
+            with torch.cuda.stream(cap_stream):
+                # pre-warm again on the capture stream
                 with torch.no_grad():
                     if need_cast:
                         with torch.autocast("cuda", dtype=DTYPE):
@@ -198,17 +209,17 @@ async def _capture_bucket(bucket: int):
                         _ = m(**inp)
                 torch.cuda.synchronize()
 
-                # the actual capture (uses current stream)
-                with torch.cuda.graph(g):
-                    if need_cast:
-                        with torch.autocast("cuda", dtype=DTYPE):
+                # actual capture — silence empty_cache to avoid allocator assert
+                with _no_empty_cache_during_capture():
+                    with torch.cuda.graph(g):
+                        if need_cast:
+                            with torch.autocast("cuda", dtype=DTYPE):
+                                out = m(**inp)
+                        else:
                             out = m(**inp)
-                    else:
-                        out = m(**inp)
-                    logits_ref = out["logits"] if isinstance(out, dict) else out.logits
+                        logits_ref = out["logits"] if isinstance(out, dict) else out.logits
 
-            # back to default stream
-            torch.cuda.current_stream().wait_stream(capture_stream)
+            torch.cuda.current_stream().wait_stream(cap_stream)
 
             GRAPHS[bucket] = (g, logits_ref, inp)
             CAPTURED.add(bucket)
@@ -257,11 +268,11 @@ async def _batcher():
         # Build batch tensor on GPU
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
-        batch = torch.from_numpy(np_stack)
-        if DEVICE.type == "cuda":
-            batch = batch.pin_memory().to(DEVICE, non_blocking=True)
-        else:
-            batch = batch.to(DEVICE)
+            batch = torch.from_numpy(np_stack)
+            if DEVICE.type == "cuda":
+                batch = batch.pin_memory().to(DEVICE, non_blocking=True)
+            else:
+                batch = batch.to(DEVICE)
         except Exception as e:
             logger.exception(f"batcher: failed to build batch tensor: {e}")
             now = time.perf_counter()
