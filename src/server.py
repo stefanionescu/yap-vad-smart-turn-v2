@@ -56,45 +56,86 @@ if USE_TORCH_COMPILE and DEVICE.type == "cuda":
 
 
 # -----------------------------
-# Performance Optimizations
+# Performance / compile control
 # -----------------------------
-# TF32 for L40S performance
 try:
-    torch.backends.cuda.matmul.allow_tf32 = True  # ok on L40S
+    torch.backends.cuda.matmul.allow_tf32 = True
 except Exception:
     pass
 torch.set_float32_matmul_precision("high")
 
-# CUDA graphs registry
+# Env toggles
+CAPTURE_ALL = os.environ.get("CAPTURE_ALL", "1") == "1"   # auto-capture on startup
+CAPTURE_CONCURRENCY = int(os.environ.get("CAPTURE_CONCURRENCY", "1"))  # 1 is safest
+
+# CUDA graphs registry/state
 GRAPHS: dict[int, tuple] = {}      # bucket -> (graph, logits_ref, static_inputs)
 CAPTURED: set[int] = set()
 CAPTURING: set[int] = set()
 
-async def _capture_bucket(bucket: int):
-    """Capture a CUDA graph for this bucket in the background."""
-    try:
-        x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-        inp = processor(
-            x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
-            max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
-        )
-        inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+# serialize first compile so we don't do it twice
+_COMPILED = False
+_COMPILE_LOCK = asyncio.Lock()
 
-        # eager warmup so torch.compile specializes before capture
-        with torch.no_grad():
-            if DEVICE.type == "cuda" and DTYPE != torch.float32:
-                with torch.autocast("cuda", dtype=DTYPE):
-                    _ = model(**inp)
-            else:
+def _eager_forward_for_compile():
+    """Run one small eager forward to drive torch.compile specialization."""
+    x = torch.zeros((1, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+    inp = processor(
+        x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+        max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
+    )
+    inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+    with torch.no_grad():
+        if DEVICE.type == "cuda" and DTYPE != torch.float32:
+            with torch.autocast("cuda", dtype=DTYPE):
                 _ = model(**inp)
-        if DEVICE.type == "cuda":
-            torch.cuda.synchronize()
+        else:
+            _ = model(**inp)
+    if DEVICE.type == "cuda":
+        torch.cuda.synchronize()
 
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            out = model(**inp)
-            logits_ref = out.logits
+async def _ensure_compiled():
+    global _COMPILED
+    if _COMPILED:
+        return
+    async with _COMPILE_LOCK:
+        if _COMPILED:
+            return
+        # off the event loop; keeps uvicorn responsive
+        await asyncio.to_thread(_eager_forward_for_compile)
+        _COMPILED = True
+        logger.info("Model compile warmup complete.")
 
+def _capture_bucket_blocking(bucket: int):
+    # blocking version used inside to_thread()
+    x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+    inp = processor(
+        x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+        max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
+    )
+    inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+
+    # one eager pass to settle shapes for this bucket
+    with torch.no_grad():
+        if DEVICE.type == "cuda" and DTYPE != torch.float32:
+            with torch.autocast("cuda", dtype=DTYPE):
+                _ = model(**inp)
+        else:
+            _ = model(**inp)
+    if DEVICE.type == "cuda":
+        torch.cuda.synchronize()
+
+    g = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(g):
+        out = model(**inp)
+        logits_ref = out.logits
+
+    return (g, logits_ref, inp)
+
+async def _capture_bucket(bucket: int):
+    try:
+        await _ensure_compiled()
+        (g, logits_ref, inp) = await asyncio.to_thread(_capture_bucket_blocking, bucket)
         GRAPHS[bucket] = (g, logits_ref, inp)
         CAPTURED.add(bucket)
         logger.info(f"CUDA graph captured for bucket={bucket}")
@@ -102,6 +143,26 @@ async def _capture_bucket(bucket: int):
         logger.exception(f"CUDA graph capture FAILED for bucket={bucket}: {e}")
     finally:
         CAPTURING.discard(bucket)
+
+
+async def _precapture_all_buckets():
+    # compile once
+    await _ensure_compiled()
+
+    buckets = sorted(BATCH_BUCKETS)
+    logger.info(f"Pre-capturing CUDA graphs for buckets={buckets}, concurrency={CAPTURE_CONCURRENCY}")
+
+    if CAPTURE_CONCURRENCY <= 1:
+        for b in buckets:
+            CAPTURING.add(b)
+            await _capture_bucket(b)
+    else:
+        sem = asyncio.Semaphore(CAPTURE_CONCURRENCY)
+        async def worker(b):
+            async with sem:
+                CAPTURING.add(b)
+                await _capture_bucket(b)
+        await asyncio.gather(*(worker(b) for b in buckets))
 
 
 # -----------------------------
@@ -128,7 +189,7 @@ def _ensure_16k_float32_1d(arr: np.ndarray) -> np.ndarray:
         arr = arr.astype(np.float32, copy=False)
     arr = np.ravel(arr)
     if arr.size > MAX_SAMPLES:
-        arr = arr[-MAX_SAMPLES:]
+        arr = arr[:MAX_SAMPLES]   # <-- first N seconds
     elif arr.size < MAX_SAMPLES:
         arr = np.pad(arr, (0, MAX_SAMPLES - arr.size), mode="constant")
     return arr
@@ -147,11 +208,9 @@ async def _batcher():
     while True:
         await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
 
-        # Drain up to largest bucket
         items: List[Item] = []
         while not QUEUE.empty() and len(items) < max(BATCH_BUCKETS):
             items.append(QUEUE.get_nowait())
-
         if not items:
             continue
 
@@ -159,7 +218,7 @@ async def _batcher():
         bucket = min([b for b in BATCH_BUCKETS if b >= depth] or [BATCH_BUCKETS[-1]])
         logger.debug(f"batcher: depth={depth} bucket={bucket} queue_empty={QUEUE.empty()}")
 
-        # Build (B, T) tensor
+        # Build (B, T)
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
             batch = torch.from_numpy(np_stack)
@@ -168,24 +227,22 @@ async def _batcher():
             else:
                 batch = batch.to(DEVICE)
         except Exception as e:
-            logger.exception(f"batcher: failed to build batch tensor: {e}")
-            # Fail-safe: resolve everything so clients don't hang
+            logger.exception(f"batcher: failed to build batch: {e}")
             now = time.perf_counter()
             for it in items:
                 if not it.fut.done():
-                    it.fut.set_result({
-                        "prediction": 0,
-                        "probability": 0.0,
-                        "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
-                    })
+                    it.fut.set_result({"prediction": 0, "probability": 0.0,
+                                       "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total}})
             continue
 
-        t0_inf = time.perf_counter()
-        logits = None
+        # ensure we compiled once (no concurrent first-run)
+        await _ensure_compiled()
 
+        t0 = time.perf_counter()
+        logits = None
         try:
             if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-                # Pad to bucket for graph replay
+                # pad for capture size
                 if batch.shape[0] < bucket:
                     pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
                     pad[: batch.shape[0]].copy_(batch)
@@ -194,76 +251,78 @@ async def _batcher():
                     batch_b = batch
 
                 if bucket in GRAPHS:
-                    # FAST PATH: replay
+                    logger.debug(f"batcher: replay graph bucket={bucket}")
                     g, logits_ref, inp = GRAPHS[bucket]
                     inp["input_values"].copy_(batch_b)
                     g.replay()
                     logits = logits_ref
                 else:
-                    # Serve eagerly NOW, capture asynchronously in background
                     if bucket not in CAPTURING:
                         CAPTURING.add(bucket)
                         asyncio.create_task(_capture_bucket(bucket))
-
+                    # serve eagerly meanwhile
+                    logger.debug(f"batcher: eager forward bucket={bucket} (graph missing)")
                     inp = processor(
                         batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                         max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
                     )
                     inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
                     with torch.no_grad():
-                        if DTYPE != torch.float32:
+                        if DTYPE != torch.float32 and DEVICE.type == "cuda":
                             with torch.autocast("cuda", dtype=DTYPE):
                                 out = model(**inp)
                         else:
                             out = model(**inp)
                     logits = out.logits
             else:
-                # Pure eager path
+                logger.debug("batcher: eager forward (no graphs)")
                 inp = processor(
                     batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                     max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
                 )
                 inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
                 with torch.no_grad():
-                    if DEVICE.type == "cuda" and DTYPE != torch.float32:
+                    if DTYPE != torch.float32 and DEVICE.type == "cuda":
                         with torch.autocast("cuda", dtype=DTYPE):
                             out = model(**inp)
                     else:
                         out = model(**inp)
                 logits = out.logits
 
-            # logits -> probs for the REAL depth (ignore padded rows)
             probs = logits.detach().float().cpu().numpy().reshape(-1)[:depth]
-            t1_inf = time.perf_counter()
+            t1 = time.perf_counter()
+            dt = t1 - t0
+            logger.debug(f"batcher: forward done in {dt*1000:.1f} ms")
 
             for it, p in zip(items, probs):
                 pred = 1 if p > THRESHOLD else 0
-                total_s = (t1_inf - it.t_start_total)
-                inf_s = (t1_inf - t0_inf)
                 if not it.fut.done():
                     it.fut.set_result({
                         "prediction": int(pred),
                         "probability": float(p),
-                        "metrics": {"inference_time": inf_s, "total_time": total_s},
+                        "metrics": {"inference_time": dt, "total_time": t1 - it.t_start_total},
                     })
 
         except Exception as e:
             logger.exception(f"batcher: inference failed: {e}")
-            # Fail-safe: resolve everything so clients don't hang
             now = time.perf_counter()
             for it in items:
                 if not it.fut.done():
-                    it.fut.set_result({
-                        "prediction": 0,
-                        "probability": 0.0,
-                        "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
-                    })
+                    it.fut.set_result({"prediction": 0, "probability": 0.0,
+                                       "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total}})
             continue
 
 
 @app.on_event("startup")
 async def _on_start():
+    # kick compile now
+    asyncio.create_task(_ensure_compiled())
+    # start batcher
     asyncio.create_task(_batcher())
+    # precapture all buckets in the background (non-blocking)
+    if USE_CUDA_GRAPHS and DEVICE.type == "cuda" and CAPTURE_ALL:
+        asyncio.create_task(_precapture_all_buckets())
+
     logger.info(f"Smart Turn v2 server ready on {DEVICE} | buckets={BATCH_BUCKETS} window_ms={MICRO_BATCH_WINDOW_MS}")
     # Write readiness file for orchestrators that prefer file-based health
     try:
@@ -278,6 +337,19 @@ async def _on_start():
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.get("/status")
+async def status():
+    return {
+        "device": str(DEVICE),
+        "dtype": str(DTYPE),
+        "compiled": _COMPILED,
+        "buckets": BATCH_BUCKETS,
+        "captured": sorted(list(CAPTURED)),
+        "capturing": sorted(list(CAPTURING)),
+        "queue_depth": QUEUE.qsize(),
+    }
 
 
 @app.post("/raw")
