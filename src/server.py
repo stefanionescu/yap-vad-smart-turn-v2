@@ -243,11 +243,11 @@ async def _batcher():
         # Build batch tensor on GPU
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
-        batch = torch.from_numpy(np_stack)
-        if DEVICE.type == "cuda":
-            batch = batch.pin_memory().to(DEVICE, non_blocking=True)
-        else:
-            batch = batch.to(DEVICE)
+            batch = torch.from_numpy(np_stack)
+            if DEVICE.type == "cuda":
+                batch = batch.pin_memory().to(DEVICE, non_blocking=True)
+            else:
+                batch = batch.to(DEVICE)
         except Exception as e:
             logger.exception(f"batcher: failed to build batch tensor: {e}")
             now = time.perf_counter()
@@ -303,13 +303,13 @@ async def _batcher():
             probs = logits.detach().float().cpu().numpy().reshape(-1)
             t1 = time.perf_counter()
             logger.debug(f"batcher: forward done in {(t1-t0)*1000:.1f} ms")
-
-        for it, p in zip(items, probs):
-            pred = 1 if p > THRESHOLD else 0
+            
+            for it, p in zip(items, probs):
+                pred = 1 if p > THRESHOLD else 0
                 if not it.fut.done():
                     it.fut.set_result({
-                "prediction": int(pred),
-                "probability": float(p),
+                        "prediction": int(pred),
+                        "probability": float(p),
                         "metrics": {"inference_time": (t1 - t0), "total_time": (t1 - it.t_start_total)},
                     })
 
@@ -317,7 +317,7 @@ async def _batcher():
             logger.exception(f"batcher: inference failed: {e}")
             now = time.perf_counter()
             for it in items:
-            if not it.fut.done():
+                if not it.fut.done():
                     it.fut.set_result({
                         "prediction": 0, "probability": 0.0,
                         "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
