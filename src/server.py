@@ -115,17 +115,19 @@ async def _compile_in_background():
         m.eval()
         m = torch.compile(m, mode="reduce-overhead")
 
-        # Warm compile path with static-sized input
-        warm = torch.zeros((1, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-        inp = _make_inputs_gpu(warm, cast_to=(DTYPE if DTYPE != torch.float32 else None))
-        with torch.no_grad():
-            if DEVICE.type == "cuda" and DTYPE != torch.float32:
-                with torch.autocast("cuda", dtype=DTYPE):
+        # 🔥 Pre-warm all buckets so no runtime recompiles
+        for b in sorted(set(BATCH_BUCKETS)):
+            logger.info(f"Background: warm compile for batch={b}")
+            warm = torch.zeros((b, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+            inp = _make_inputs_gpu(warm, cast_to=(DTYPE if DTYPE != torch.float32 else None))
+            with torch.no_grad():
+                if DEVICE.type == "cuda" and DTYPE != torch.float32:
+                    with torch.autocast("cuda", dtype=DTYPE):
+                        _ = m(**inp)
+                else:
                     _ = m(**inp)
-            else:
-                _ = m(**inp)
-        if DEVICE.type == "cuda":
-            torch.cuda.synchronize()
+            if DEVICE.type == "cuda":
+                torch.cuda.synchronize()
 
         _COMPILED_MODEL = m
         _COMPILED_READY = True

@@ -66,7 +66,7 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 
 - `AUTH_KEY` (optional): If set, server requires `Authorization: Key <AUTH_KEY>`.
 - `BATCH_BUCKETS` (default `1,2,4,8`): Comma-separated micro-batch sizes.
-- `MICRO_BATCH_WINDOW_MS` (default `2` in constants, `5` in scripts): Batching window in milliseconds.
+- `MICRO_BATCH_WINDOW_MS` (default `5`): Batching window in milliseconds.
 - `DTYPE` (`bfloat16` or `float32`, default `bfloat16`): Compute dtype.
 - `THRESHOLD` (default `0.5`): Decision threshold over probability.
 - `TORCH_COMPILE` (`0|1`, default `1`): Use `torch.compile` reduce-overhead mode.
@@ -195,9 +195,10 @@ batch = batch.pin_memory().to(DEVICE, non_blocking=True)
 ### Model Loading & Compilation
 
 1. **Eager Model**: Loads immediately on first request for fast startup
-2. **Background Compilation**: `torch.compile()` runs in parallel with serving
-3. **Atomic Swap**: Once compiled model is warmed up, switches `_ACTIVE_MODEL`
-4. **Resilient**: Compilation failures don't crash server, falls back to eager
+2. **Background Compilation**: `torch.compile()` runs in parallel with serving  
+3. **Pre-warming**: All batch sizes (1,2,4,8) are compiled upfront to prevent runtime JIT stalls
+4. **Atomic Swap**: Once compiled model is warmed up, switches `_ACTIVE_MODEL`
+5. **Resilient**: Compilation failures don't crash server, falls back to eager
 
 ### What's Different from Typical Setups
 
@@ -283,8 +284,10 @@ export LOG_LEVEL=DEBUG                   # Enable detailed logging for productio
 ```
 
 ### Performance Tuning
-- **For more throughput**: Increase `MICRO_BATCH_WINDOW_MS=8-12` (trades a few ms latency for better batching)
+- **For more throughput**: Increase `MICRO_BATCH_WINDOW_MS=4-8` (trades a few ms latency for better batching)
 - **torch.compile mode**: `reduce-overhead` is the default. Only try `max-autotune` if you benchmark an improvement.
+- **Shape specialization**: All bucket sizes are pre-warmed during compilation to avoid runtime JIT stalls
+- **Alternative**: Use `dynamic=True` in torch.compile for fewer specializations (slightly slower but more flexible)
 - **Hardware**: Designed for NVIDIA L40S. Works on other modern CUDA GPUs with sufficient VRAM.
 
 ### Deployment Notes

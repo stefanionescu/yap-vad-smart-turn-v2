@@ -16,7 +16,7 @@ THRESHOLD = float(os.environ.get("THRESHOLD", "0.5"))
 MODEL_ID = os.environ.get("MODEL_ID", "pipecat-ai/smart-turn-v2")
 
 # Batching
-MICRO_BATCH_WINDOW_MS = int(os.environ.get("MICRO_BATCH_WINDOW_MS", "2"))
+MICRO_BATCH_WINDOW_MS = int(os.environ.get("MICRO_BATCH_WINDOW_MS", "5"))
 
 # Auth
 AUTH_KEY = os.environ.get("AUTH_KEY", "")
