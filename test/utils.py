@@ -45,7 +45,7 @@ def load_audio_from_samples(path: str, seconds_pad_to: int = 8) -> Tuple[np.ndar
 
     target = SAMPLE_RATE * seconds_pad_to
     if arr.size > target:
-        arr = arr[-target:]
+        arr = arr[:target]   # take FIRST N seconds
     elif arr.size < target:
         arr = np.pad(arr, (0, target - arr.size), mode="constant")
 

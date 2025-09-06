@@ -56,6 +56,14 @@ if USE_TORCH_COMPILE and DEVICE.type == "cuda":
 
 
 # -----------------------------
+# CUDA Graphs State (module globals)
+# -----------------------------
+GRAPHS: dict[int, tuple] = {}          # bucket -> (graph, logits_ref, static_inputs)
+CAPTURED: set[int] = set()             # buckets captured
+CAPTURING: set[int] = set()            # buckets currently capturing
+
+
+# -----------------------------
 # App & Batching
 # -----------------------------
 app = FastAPI()
@@ -73,6 +81,37 @@ class Item:
 QUEUE: asyncio.Queue[Item] = asyncio.Queue()
 
 
+async def _capture_bucket(bucket: int, processor, model, DEVICE, MAX_SAMPLES, DTYPE, SAMPLE_RATE):
+    """Capture CUDA graph for a specific bucket size in the background."""
+    try:
+        # Build static inputs for capture
+        x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+        inp = processor(
+            x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+            max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
+        )
+        inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+
+        # one eager forward to make torch.compile specialize before capture
+        with torch.no_grad():
+            if DTYPE != torch.float32:
+                with torch.autocast("cuda", dtype=DTYPE):
+                    _ = model(**inp)
+            else:
+                _ = model(**inp)
+        torch.cuda.synchronize()
+
+        g = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(g):
+            out = model(**inp)
+            logits_ref = out.logits
+        GRAPHS[bucket] = (g, logits_ref, inp)
+        CAPTURED.add(bucket)
+        logger.debug(f"CUDA graph captured for bucket={bucket}")
+    except Exception as e:
+        logger.exception(f"CUDA graph capture failed for bucket={bucket}: {e}")
+    finally:
+        CAPTURING.discard(bucket)
 
 
 def _ensure_16k_float32_1d(arr: np.ndarray) -> np.ndarray:
@@ -98,9 +137,6 @@ async def _batcher():
     """Micro-batcher. No warmup. Lazy CUDA-graph capture per bucket on first use."""
     await asyncio.sleep(0)  # let uvicorn finish binding
 
-    # bucket_size -> (graph, logits_ref, static_inputs)
-    graphs = {}
-
     while True:
         await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
 
@@ -112,6 +148,7 @@ async def _batcher():
 
         depth = len(items)
         bucket = min([b for b in BATCH_BUCKETS if b >= depth] or [BATCH_BUCKETS[-1]])
+        logger.debug("batcher: depth=%d bucket=%d queue_empty=%s", depth, bucket, QUEUE.empty())
 
         # Build CPU tensor → pinned → HtoD
         np_stack = np.stack([it.arr for it in items], axis=0)  # (B, T) float32
@@ -125,7 +162,7 @@ async def _batcher():
 
         try:
             if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-                # pad to the bucket size; keep actual depth
+                # ensure padded to bucket
                 if batch.shape[0] < bucket:
                     pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
                     pad[: batch.shape[0]].copy_(batch)
@@ -133,39 +170,31 @@ async def _batcher():
                 else:
                     batch_b = batch
 
-                if bucket in graphs:
-                    g, logits_ref, inp = graphs[bucket]
+                if bucket in GRAPHS:
+                    # FAST PATH: replay
+                    g, logits_ref, inp = GRAPHS[bucket]
+                    inp["input_values"].copy_(batch_b)
+                    g.replay()
+                    logits = logits_ref
                 else:
-                    # First time for this bucket:
-                    # 1) build static inputs
-                    x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+                    # No graph yet -> serve EAGER NOW, capture ASYNC
+                    if bucket not in CAPTURING:
+                        CAPTURING.add(bucket)
+                        asyncio.create_task(_capture_bucket(bucket, processor, model, DEVICE, MAX_SAMPLES, DTYPE, SAMPLE_RATE))
+
+                    # eager forward (no graphs) for this micro-batch
                     inp = processor(
-                        x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+                        batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                         max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
                     )
                     inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-
-                    # 2) run ONE eager forward to allow torch.compile to compile kernels
                     with torch.no_grad():
-                        if DTYPE != torch.float32:
+                        if DEVICE.type == "cuda" and DTYPE != torch.float32:
                             with torch.autocast("cuda", dtype=DTYPE):
-                                _ = model(**inp)
+                                out = model(**inp)
                         else:
-                            _ = model(**inp)
-                    torch.cuda.synchronize()
-
-                    # 3) capture the CUDA graph
-                    g = torch.cuda.CUDAGraph()
-                    with torch.cuda.graph(g):
-                        out = model(**inp)
-                        logits_ref = out.logits
-                    graphs[bucket] = (g, logits_ref, inp)
-
-                # replay with real (padded) batch
-                inp["input_values"].copy_(batch_b)
-                g, logits_ref, _ = graphs[bucket]
-                g.replay()
-                logits = logits_ref
+                            out = model(**inp)
+                    logits = out.logits
             else:
                 # no-graphs path
                 inp = processor(
@@ -242,13 +271,16 @@ async def raw(request: Request):
         raise HTTPException(status_code=401, detail="Unauthorized")
     try:
         body = await request.body()
+        logger.debug("POST /raw: received %d bytes", len(body))
         arr = np.load(io.BytesIO(body), allow_pickle=False)
         arr = _ensure_16k_float32_1d(arr)
+        logger.debug("POST /raw: parsed npy -> %s", arr.shape)
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Invalid npy payload: {e}")
 
     item = Item(arr)
     await QUEUE.put(item)
+    logger.debug("POST /raw: queued item")
     return await item.fut
 
 

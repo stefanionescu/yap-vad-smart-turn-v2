@@ -54,7 +54,10 @@ fi
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"
   source .venv/bin/activate
-  python -m test.warmup --sample "samples/$SAMPLE" --seconds "$SECONDS_PAD" --timeout 180
+  python -m test.warmup --sample "samples/$SAMPLE" --seconds "$SECONDS_PAD" \
+    --url http://127.0.0.1:8000/raw \
+    --key "${AUTH_KEY:-}" \
+    --timeout 180
 fi
 
 echo "[main] Done. Logs: $ROOT_DIR/logs/server.log"

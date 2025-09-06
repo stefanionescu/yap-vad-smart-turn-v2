@@ -16,7 +16,7 @@ def parse_args():
     p.add_argument("--sample", default="mid.wav", help="sample file under samples/ (.wav/.npy)")
     p.add_argument("--seconds", type=int, default=8)
     p.add_argument("--url", default=None)
-    p.add_argument("--timeout", type=float, default=180)
+    p.add_argument("--timeout", type=float, default=10)
     return p.parse_args()
 
 

@@ -22,7 +22,7 @@ async def main():
     ap.add_argument("--sample", required=True)
     ap.add_argument("--seconds", type=float, default=8)
     ap.add_argument("--key", default="")
-    ap.add_argument("--timeout", type=float, default=180)  # allow first-hit compile+capture
+    ap.add_argument("--timeout", type=float, default=10)  # allow first-hit compile+capture
     args = ap.parse_args()
 
     arr = load_first_seconds(args.sample, args.seconds)
