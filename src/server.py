@@ -204,7 +204,6 @@ def _auth_ok(request: Request) -> bool:
 
 async def _batcher():
     await asyncio.sleep(0)  # let uvicorn bind
-    await _ensure_compiled()
 
     while True:
         await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
