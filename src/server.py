@@ -125,7 +125,7 @@ async def _batcher():
 
         try:
             if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-                # pad to bucket size, keep actual depth separately
+                # pad to the bucket size; keep actual depth
                 if batch.shape[0] < bucket:
                     pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
                     pad[: batch.shape[0]].copy_(batch)
@@ -136,15 +136,26 @@ async def _batcher():
                 if bucket in graphs:
                     g, logits_ref, inp = graphs[bucket]
                 else:
-                    # first time for this bucket: capture
+                    # First time for this bucket:
+                    # 1) build static inputs
                     x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
                     inp = processor(
                         x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                         max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
                     )
                     inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-                    g = torch.cuda.CUDAGraph()
+
+                    # 2) run ONE eager forward to allow torch.compile to compile kernels
+                    with torch.no_grad():
+                        if DTYPE != torch.float32:
+                            with torch.autocast("cuda", dtype=DTYPE):
+                                _ = model(**inp)
+                        else:
+                            _ = model(**inp)
                     torch.cuda.synchronize()
+
+                    # 3) capture the CUDA graph
+                    g = torch.cuda.CUDAGraph()
                     with torch.cuda.graph(g):
                         out = model(**inp)
                         logits_ref = out.logits
@@ -152,9 +163,11 @@ async def _batcher():
 
                 # replay with real (padded) batch
                 inp["input_values"].copy_(batch_b)
+                g, logits_ref, _ = graphs[bucket]
                 g.replay()
                 logits = logits_ref
             else:
+                # no-graphs path
                 inp = processor(
                     batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
                     max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",

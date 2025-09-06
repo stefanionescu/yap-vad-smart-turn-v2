@@ -39,21 +39,22 @@ sleep 2
 bash "$SCRIPT_DIR/tail_bg_logs.sh" &
 echo $! > "$RUN_DIR/tail.pid"
 
-# Wait for readiness
-echo -n "[main] Waiting for HTTP health"
-for i in $(seq 1 120); do
-  if curl -fsS --retry 0 --max-time 1 http://127.0.0.1:8000/health >/dev/null; then
-    echo " ✔"
-    break
-  fi
-  sleep 1
-  [ $i -eq 120 ] && { echo " ✖ timed out"; exit 3; }
-done
+# Wait once, not a loop
+echo -n "[main] Waiting 15s before first health probe..."
+sleep 15
+echo " done."
+
+echo -n "[main] Health probe -> "
+if curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
+  echo "✔"
+else
+  echo "✖"; echo "[main] Last 120 lines of server log:"; tail -n 120 logs/server.log; exit 3
+fi
 
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"
   source .venv/bin/activate
-  python -m test.warmup --sample "$SAMPLE" --seconds "$SECONDS_PAD"
+  python -m test.warmup --sample "samples/$SAMPLE" --seconds "$SECONDS_PAD" --timeout 180
 fi
 
 echo "[main] Done. Logs: $ROOT_DIR/logs/server.log"

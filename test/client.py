@@ -15,6 +15,8 @@ def parse_args():
     p = argparse.ArgumentParser(description="HTTP client for Smart Turn server")
     p.add_argument("--sample", default="mid.wav", help="sample file under samples/ (.wav/.npy)")
     p.add_argument("--seconds", type=int, default=8)
+    p.add_argument("--url", default=None)
+    p.add_argument("--timeout", type=float, default=180)
     return p.parse_args()
 
 
@@ -25,17 +27,24 @@ def build_payload(args) -> bytes:
 
 async def main():
     args = parse_args()
-    host = os.getenv("RUNPOD_TCP_HOST", "localhost")
-    port = int(os.getenv("RUNPOD_TCP_PORT", "8000"))
-    auth = os.getenv("AUTH_KEY", os.getenv("API_KEY", "dev"))
-    url = f"http://{host}:{port}/raw"
-    headers = {"Content-Type": "application/octet-stream", "Authorization": f"Key {auth}"}
+    if args.url:
+        url = args.url
+    else:
+        host = os.getenv("RUNPOD_TCP_HOST", "localhost")
+        port = int(os.getenv("RUNPOD_TCP_PORT", "8000"))
+        url = f"http://{host}:{port}/raw"
+
+    auth = os.getenv("AUTH_KEY", os.getenv("API_KEY", ""))
+    headers = {"Content-Type": "application/octet-stream"}
+    if auth:
+        headers["Authorization"] = f"Key {auth}"
 
     body = build_payload(args)
-    async with aiohttp.ClientSession() as s:
-        async with s.post(url, data=body, headers=headers, timeout=30) as r:
-            js = await r.json()
-            print(js)
+    timeout = aiohttp.ClientTimeout(total=args.timeout)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(url, data=body, headers=headers) as r:
+            r.raise_for_status()
+            print(await r.json())
 
 
 if __name__ == "__main__":

@@ -1,37 +1,42 @@
-import asyncio
-import aiohttp
-import argparse
-import os
-from .utils import load_audio_from_samples
+import argparse, io, asyncio, numpy as np
+import aiohttp, torch, torchaudio
 
+SR = 16000
 
-def parse_args():
-    p = argparse.ArgumentParser(description="Warmup requests to Smart Turn server")
-    p.add_argument("--auth", default=None, help="auth key (defaults to AUTH_KEY env var)")
-    p.add_argument("--sample", default="mid.wav", help="sample file name under samples/")
-    p.add_argument("--n", type=int, default=1, help="number of warmup requests (default 1)")
-    p.add_argument("--seconds", type=int, default=8, help="pad/truncate to this many seconds")
-    return p.parse_args()
-
+def load_first_seconds(path: str, seconds: float) -> np.ndarray:
+    wav, sr = torchaudio.load(path)          # (C, T), float32/float64
+    if wav.shape[0] > 1:
+        wav = wav.mean(dim=0, keepdim=True)  # mono
+    if sr != SR:
+        wav = torchaudio.transforms.Resample(sr, SR)(wav)
+    T = int(SR * seconds)
+    wav = wav[:, :T]
+    if wav.shape[1] < T:
+        pad = torch.zeros(1, T - wav.shape[1], dtype=wav.dtype)
+        wav = torch.cat([wav, pad], dim=1)
+    return wav.squeeze(0).to(torch.float32).numpy()
 
 async def main():
-    args = parse_args()
-    # Honor AUTH_KEY conditionally - only send if set
-    auth_key = args.auth or os.environ.get("AUTH_KEY")
-    headers = {"Content-Type": "application/octet-stream"}
-    if auth_key:
-        headers["Authorization"] = f"Key {auth_key}"
-        
-    url = "http://localhost:8000/raw"
-    _, payload = load_audio_from_samples(args.sample, seconds_pad_to=args.seconds)
-    async with aiohttp.ClientSession() as s:
-        for i in range(args.n):
-            async with s.post(url, data=payload, headers=headers, timeout=30) as r:
-                js = await r.json()
-                print(f"warmup[{i}] => {js}")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--url", default="http://127.0.0.1:8000/raw")
+    ap.add_argument("--sample", required=True)
+    ap.add_argument("--seconds", type=float, default=8)
+    ap.add_argument("--key", default="")
+    ap.add_argument("--timeout", type=float, default=180)  # allow first-hit compile+capture
+    args = ap.parse_args()
 
+    arr = load_first_seconds(args.sample, args.seconds)
+    buf = io.BytesIO(); np.save(buf, arr)
+
+    headers = {"Content-Type": "application/octet-stream"}
+    if args.key:
+        headers["Authorization"] = f"Key {args.key}"
+
+    timeout = aiohttp.ClientTimeout(total=args.timeout)
+    async with aiohttp.ClientSession(timeout=timeout) as s:
+        async with s.post(args.url, data=buf.getvalue(), headers=headers) as r:
+            r.raise_for_status()
+            print(await r.json())
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-
