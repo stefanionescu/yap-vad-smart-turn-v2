@@ -1,12 +1,14 @@
-## Yap Smart Turn v2
+## Yap Smart Turn
 
 FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching on NVIDIA L40S. Same wire format as Pipecat's `HttpSmartTurnAnalyzer`: POST `/raw` with `np.save` bytes → JSON `{prediction, probability, metrics}`.
 
 ### Why this setup
 
-- **Fast**: micro-batches 16/32/64 with a 1–2 ms window, uses pinned memory and optional `torch.compile`. Designed for 8–16 s mono 16 kHz PCM.
+- **Fast**: micro-batches with smart bucket sizes (1,2,4,8) and 5ms window, uses pinned memory and `torch.compile`. Designed for 8–16s mono 16kHz PCM.
+- **Efficient**: Async queue-based batching with eager→compiled model swapping. No blocking waits.
 - **Simple**: no Docker required. Works well on Runpod dedicated L40S (CUDA 12.8 drivers are compatible with PyTorch cu124 wheels).
 - **Compatible**: exact Pipecat HTTP analyzer format.
+- **Stable**: CUDA graphs removed, smaller batch buckets prevent OOM, expandable memory segments.
 
 ---
 
@@ -47,20 +49,33 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 ```
 
 - `GET /health` → `{ "ok": true }`
+- `GET /status` → Server diagnostics:
+  ```json
+  {
+    "device": "cuda:0",
+    "dtype": "torch.bfloat16", 
+    "compiled_ready": true,
+    "buckets": [1, 2, 4, 8],
+    "queue_depth": 0
+  }
+  ```
 
 ---
 
 ## Environment variables
 
 - `AUTH_KEY` (optional): If set, server requires `Authorization: Key <AUTH_KEY>`.
-- `BATCH_BUCKETS` (default `16,32,64`): Comma-separated micro-batch sizes.
-- `MICRO_BATCH_WINDOW_MS` (default `2`): Batching window in milliseconds.
-- `DTYPE` (`bfloat16` or `float32`, default `bfloat16` on CUDA): Compute dtype.
+- `BATCH_BUCKETS` (default `1,2,4,8`): Comma-separated micro-batch sizes.
+- `MICRO_BATCH_WINDOW_MS` (default `2` in constants, `5` in scripts): Batching window in milliseconds.
+- `DTYPE` (`bfloat16` or `float32`, default `bfloat16`): Compute dtype.
 - `THRESHOLD` (default `0.5`): Decision threshold over probability.
-- `TORCH_COMPILE` (`0|1`): Use `torch.compile` reduce-overhead mode.
-- `CUDA_GRAPHS` (`0|1`): Capture CUDA graphs per bucket (advanced).
+- `TORCH_COMPILE` (`0|1`, default `1`): Use `torch.compile` reduce-overhead mode.
 - `MODEL_ID` (default `pipecat-ai/smart-turn-v2`).
+- `MAX_SECS` (default `16`): Maximum audio duration in seconds.
+- `PYTORCH_CUDA_ALLOC_CONF` (default `expandable_segments:True`): CUDA memory allocator.
 - Port is fixed to `8000` (see `src/constants.py`).
+
+**Note**: CUDA graphs have been removed from the codebase for stability.
 
 ---
 
@@ -137,11 +152,140 @@ asyncio.run(main())
 
 ---
 
+## How it works
+
+### Architecture Overview
+
+The server uses an **async queue-based micro-batching architecture**:
+
+1. **Request Flow**: `POST /raw` → parse numpy → queue item → await result
+2. **Batching Loop**: Runs every `MICRO_BATCH_WINDOW_MS`, drains queue up to max bucket size
+3. **Smart Bucketing**: Chooses smallest bucket size ≥ actual batch size (e.g., 3 requests → bucket=4)
+4. **GPU Inference**: Batch processing with pinned memory and non-blocking transfers
+5. **Model Management**: Starts with eager model, compiles in background, swaps atomically
+
+### Key Components
+
+- **`_batcher()`**: Main async loop that collects requests and runs inference
+- **`Item`**: Request wrapper with numpy array, future, and timing
+- **`QUEUE`**: Async queue holding incoming requests
+- **`_ACTIVE_MODEL`**: Current serving model (eager → compiled transition)
+- **`_ensure_16k()`**: Normalizes input audio to 16kHz mono, pads/truncates to MAX_SAMPLES
+
+### Batching Algorithm
+
+```python
+# Every MICRO_BATCH_WINDOW_MS milliseconds:
+while not QUEUE.empty() and len(items) < max(BATCH_BUCKETS):
+    items.append(QUEUE.get_nowait())
+
+# Choose smallest bucket >= actual batch size
+bucket = min([b for b in BATCH_BUCKETS if b >= len(items)])
+
+# Build GPU batch tensor with pinned memory
+batch = torch.from_numpy(np.stack([item.arr for item in items]))
+batch = batch.pin_memory().to(DEVICE, non_blocking=True)
+```
+
+### Model Loading & Compilation
+
+1. **Eager Model**: Loads immediately on first request for fast startup
+2. **Background Compilation**: `torch.compile()` runs in parallel with serving
+3. **Atomic Swap**: Once compiled model is warmed up, switches `_ACTIVE_MODEL`
+4. **Resilient**: Compilation failures don't crash server, falls back to eager
+
+### What's Different from Typical Setups
+
+- **No CUDA Graphs**: Removed for stability - torch.compile provides sufficient optimization
+- **Small Batch Buckets**: (1,2,4,8) instead of (16,32,64) to prevent GPU OOM on L40S  
+- **Async Queue Architecture**: Non-blocking requests with futures, no threading complexity
+- **Atomic Model Swapping**: Smooth eager→compiled transition without request interruption
+- **Expandable Memory Segments**: Better CUDA memory management vs default PyTorch allocator
+
+---
+
 ## Tuning
 
-- Start with `MICRO_BATCH_WINDOW_MS=2`, `BATCH_BUCKETS=16,32,64`.
+- Default configuration uses `MICRO_BATCH_WINDOW_MS=5`, `BATCH_BUCKETS=1,2,4,8` (stable, smaller buckets to avoid OOM).
 - Prefer `DTYPE=bfloat16` on L40S; switch to `float32` for accuracy validation.
 - Keep a single worker process; model is loaded once.
+- See "Production Deployment" section below for detailed performance tuning options.
+
+---
+
+## Code Structure
+
+```
+src/
+├── server.py          # Main FastAPI server with batching logic
+├── constants.py       # Configuration constants and environment parsing  
+└── model.py          # Custom Wav2Vec2ForEndpointing model class
+
+scripts/
+├── main.sh           # One-command setup → start → warmup
+├── setup.sh          # Install venv, PyTorch, model weights
+├── start.sh          # Foreground server start
+├── start_bg.sh       # Background server start  
+├── stop.sh           # Stop server, optional cleanup
+└── tail_bg_logs.sh   # Follow server logs
+
+test/
+├── warmup.py         # Single request warmup utility
+├── bench.py          # Load testing with concurrency
+├── client.py         # Test client with .env config
+└── utils.py          # Shared test utilities
+```
+
+### Key Files Explained
+
+- **`server.py`**: Contains the entire server logic including:
+  - Async queue-based micro-batching (`_batcher()`)
+  - Model loading and compilation management
+  - FastAPI routes (`/raw`, `/health`, `/status`)  
+  - Audio preprocessing and GPU memory management
+
+- **`constants.py`**: Centralized configuration with environment variable parsing for audio settings, model config, and batching parameters
+
+- **`model.py`**: Custom Wav2Vec2 model class that adds the binary classification head for turn-taking detection
+
+- **Scripts**: Production-ready deployment scripts with proper environment setup, background process management, and monitoring
+
+---
+
+## Production Deployment
+
+For production use, follow this hygiene checklist:
+
+### Security
+- **Set `AUTH_KEY`** before exposing the port. Generate a strong key and use `Authorization: Key <AUTH_KEY>` header in requests.
+
+### Resource Configuration
+- **Keep `--workers 1`** per GPU. Each worker loads the full model into GPU memory.
+- **Monitor `/status`** endpoint for `queue_depth` to make autoscaling decisions.
+- **Leave warmup enabled** - the startup scripts trigger compilation so the first real call is fast.
+
+### Stable Environment Variables
+These are the tested, stable defaults (already set in the scripts):
+
+```bash
+export BATCH_BUCKETS="1,2,4,8"          # Small buckets to avoid OOM
+export TORCH_COMPILE=1                   # Enables torch.compile optimization
+export CUDA_GRAPHS=0                     # CUDA graphs disabled (cleaned up)
+export DTYPE=bfloat16                    # Optimal for L40S/modern GPUs
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True  # Better memory management
+export MICRO_BATCH_WINDOW_MS=5           # 5ms window (2-10ms range)
+```
+
+### Performance Tuning
+- **For more throughput**: Increase `MICRO_BATCH_WINDOW_MS=8-12` (trades a few ms latency for better batching)
+- **torch.compile mode**: `reduce-overhead` is the default. Only try `max-autotune` if you benchmark an improvement.
+- **Hardware**: Designed for NVIDIA L40S. Works on other modern CUDA GPUs with sufficient VRAM.
+
+### Deployment Notes
+- Server binds to `0.0.0.0:8000` by default
+- Logs to `logs/server.log` in background mode
+- Ready signal written to `.run/ready` on startup
+- Use reverse proxy (nginx/caddy) for TLS termination
 
 ---
 

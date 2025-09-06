@@ -18,6 +18,7 @@ export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
 export DTYPE="${DTYPE:-bfloat16}"
+export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
 
 PORT=8000
 echo "[start_bg] Launching on port ${PORT}"

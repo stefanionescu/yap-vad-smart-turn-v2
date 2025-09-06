@@ -43,6 +43,9 @@ export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
+export DTYPE="${DTYPE:-bfloat16}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
 
 MODEL_ID="${MODEL_ID:-pipecat-ai/smart-turn-v2}"
 python - <<PY
@@ -71,6 +74,8 @@ else:
 PY
 
 echo "[setup] Complete. Activate with: source .venv/bin/activate"
+echo "[setup] Defaults: BATCH_BUCKETS=$BATCH_BUCKETS, TORCH_COMPILE=$TORCH_COMPILE, CUDA_GRAPHS=$CUDA_GRAPHS"
+echo "[setup]           DTYPE=$DTYPE, MICRO_BATCH_WINDOW_MS=$MICRO_BATCH_WINDOW_MS"
 
 
 

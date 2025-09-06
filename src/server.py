@@ -1,7 +1,6 @@
 # src/server.py
 import os, io, time, asyncio
-from typing import List, Dict, Tuple
-from contextlib import contextmanager
+from typing import List
 
 import numpy as np
 import torch
@@ -23,12 +22,6 @@ from .constants import (
 import torch._dynamo as dynamo
 dynamo.config.suppress_errors = True
 
-# Avoid nested cudagraphs inside torch.compile; we manage graphs manually
-try:
-    import torch._inductor.config as inductor_cfg
-    inductor_cfg.triton.cudagraphs = False
-except Exception:
-    pass
 
 # -------- Configurable buckets (1..64 by default) ----------
 def _parse_buckets(val: str) -> list[int]:
@@ -39,8 +32,7 @@ def _parse_buckets(val: str) -> list[int]:
 
 BATCH_BUCKETS = _parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8"))
 USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
-USE_CUDA_GRAPHS  = os.environ.get("CUDA_GRAPHS", "1") == "1"
-CAPTURE_CONCURRENCY = int(os.environ.get("CAPTURE_CONCURRENCY", "1"))
+USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 
 # -------- Device / precision ----------
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -60,15 +52,6 @@ _COMPILED_MODEL: torch.nn.Module | None = None
 _COMPILED_READY = False
 
 _EAGER_MODEL: torch.nn.Module | None = None       # plain eager for serving until compiled swaps in
-_GRAPH_MODEL: torch.nn.Module | None = None       # plain eager used ONLY for CUDA graphs
-
-# CUDA-graphs per bucket: bucket -> (graph, logits_ref, static_inputs)
-GRAPHS: Dict[int, Tuple[torch.cuda.CUDAGraph, torch.Tensor, Dict[str, torch.Tensor]]] = {}
-CAPTURED: set[int] = set()
-CAPTURING: set[int] = set()
-
-# Capture concurrency control (single-flight by default)
-_CAPTURE_SEM = asyncio.Semaphore(CAPTURE_CONCURRENCY)
 
 # -------- Helpers ----------
 def _ensure_16k(arr: np.ndarray) -> np.ndarray:
@@ -144,95 +127,6 @@ async def _compile_in_background():
     except Exception as e:
         logger.exception(f"Background compile failed: {e}")
 
-async def _ensure_graph_model():
-    global _GRAPH_MODEL
-    if _GRAPH_MODEL is None:
-        m = Wav2Vec2ForEndpointing.from_pretrained(MODEL_ID).to(DEVICE)
-        if DTYPE != torch.float32:
-            m = m.to(dtype=DTYPE)
-        m.eval()
-        _GRAPH_MODEL = m
-        logger.info("Graph model (eager) built for CUDA graphs.")
-
-@contextmanager
-def _no_empty_cache_during_capture():
-    """Torch calls empty_cache() at graph enter; silence it to avoid allocator assert."""
-    orig = torch.cuda.empty_cache
-    try:
-        torch.cuda.empty_cache = lambda: None
-        yield
-    finally:
-        torch.cuda.empty_cache = orig
-
-async def _capture_bucket(bucket: int):
-    if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
-        return
-    if bucket in CAPTURED or bucket in CAPTURING:
-        return
-
-    CAPTURING.add(bucket)
-    try:
-        async with _CAPTURE_SEM:
-            await _ensure_graph_model()
-            m = _GRAPH_MODEL
-
-            logger.info(f"CUDA graph capture: bucket={bucket} starting...")
-
-            # Static inputs for this bucket
-            x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-            need_cast = (DTYPE != torch.float32)
-            inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
-
-            # Warm once on default stream to settle kernels
-            with torch.no_grad():
-                if need_cast:
-                    with torch.autocast("cuda", dtype=DTYPE):
-                        _ = m(**inp)
-                else:
-                    _ = m(**inp)
-            if DEVICE.type == "cuda":
-                torch.cuda.synchronize()
-
-            # Capture on a private stream
-            cap_stream = torch.cuda.Stream()
-            g = torch.cuda.CUDAGraph()
-
-            cap_stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(cap_stream):
-                # pre-warm again on the capture stream
-                with torch.no_grad():
-                    if need_cast:
-                        with torch.autocast("cuda", dtype=DTYPE):
-                            _ = m(**inp)
-                    else:
-                        _ = m(**inp)
-                torch.cuda.synchronize()
-
-                with _no_empty_cache_during_capture():
-                    with torch.cuda.graph(g):
-                        if need_cast:
-                            with torch.autocast("cuda", dtype=DTYPE):
-                                out = m(**inp)
-                        else:
-                            out = m(**inp)
-                        logits_ref = out["logits"] if isinstance(out, dict) else out.logits
-
-            torch.cuda.current_stream().wait_stream(cap_stream)
-
-            GRAPHS[bucket] = (g, logits_ref, inp)
-            CAPTURED.add(bucket)
-            logger.info(f"CUDA graph capture: bucket={bucket} DONE.")
-    except Exception as e:
-        logger.exception(f"CUDA graph capture failed for bucket={bucket}: {e}")
-    finally:
-        CAPTURING.discard(bucket)
-
-def _kickoff_all_captures():
-    if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
-        return
-    logger.info(f"Starting background graph capture for buckets={BATCH_BUCKETS}")
-    for b in BATCH_BUCKETS:
-        asyncio.create_task(_capture_bucket(b))
 
 # -------- FastAPI app & queue ----------
 app = FastAPI()
@@ -286,46 +180,21 @@ async def _batcher():
         logits = None
 
         try:
-            # Fast path: replay CUDA graph if captured
-            if USE_CUDA_GRAPHS and bucket in GRAPHS and DEVICE.type == "cuda":
-                logger.debug(f"batcher: replay graph bucket={bucket}")
-                g, logits_ref, inp = GRAPHS[bucket]
+            # compiled or eager
+            if _ACTIVE_MODEL is None:
+                _build_eager_if_needed()
+                asyncio.create_task(_compile_in_background())
 
-                # pad to bucket for static graph
-                if batch.shape[0] < bucket:
-                    pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
-                    pad[: batch.shape[0]].copy_(batch)
-                    batch_b = pad
-                else:
-                    batch_b = batch
-
-                # inputs must match captured dtype
-                copy_src = batch_b if DTYPE == torch.float32 else batch_b.to(dtype=DTYPE)
-                inp["input_values"].copy_(copy_src)
-                inp["attention_mask"].fill_(1)
-                g.replay()
-                logits = logits_ref[:depth]
-
-            else:
-                # compiled or eager
-                if _ACTIVE_MODEL is None:
-                    _build_eager_if_needed()
-                    asyncio.create_task(_compile_in_background())
-                
-                # Trigger capture for this specific bucket if not already captured/capturing
-                if USE_CUDA_GRAPHS and DEVICE.type == "cuda" and bucket not in CAPTURED and bucket not in CAPTURING:
-                    asyncio.create_task(_capture_bucket(bucket))
-
-                m = _ACTIVE_MODEL
-                logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
-                inp = _make_inputs_gpu(batch, cast_to=(DTYPE if DTYPE != torch.float32 else None))
-                with torch.no_grad():
-                    if DEVICE.type == "cuda" and DTYPE != torch.float32:
-                        with torch.autocast("cuda", dtype=DTYPE):
-                            out = m(**inp)
-                    else:
+            m = _ACTIVE_MODEL
+            logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
+            inp = _make_inputs_gpu(batch, cast_to=(DTYPE if DTYPE != torch.float32 else None))
+            with torch.no_grad():
+                if DEVICE.type == "cuda" and DTYPE != torch.float32:
+                    with torch.autocast("cuda", dtype=DTYPE):
                         out = m(**inp)
-                logits = out["logits"] if isinstance(out, dict) else out.logits
+                else:
+                    out = m(**inp)
+            logits = out["logits"] if isinstance(out, dict) else out.logits
 
             probs = logits.detach().float().cpu().numpy().reshape(-1)
             t1 = time.perf_counter()
@@ -355,7 +224,6 @@ async def _batcher():
 async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
     asyncio.create_task(_batcher())
-    # Note: Removed _kickoff_all_captures() - now capture on demand to save memory
 
     # mark ready file
     try:
@@ -376,8 +244,6 @@ async def status():
         "device": str(DEVICE),
         "dtype": str(DTYPE),
         "compiled_ready": _COMPILED_READY,
-        "captured": sorted(list(CAPTURED)),
-        "capturing": sorted(list(CAPTURING)),
         "buckets": BATCH_BUCKETS,
         "queue_depth": QUEUE.qsize(),
     }

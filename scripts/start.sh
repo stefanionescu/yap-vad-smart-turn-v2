@@ -16,8 +16,10 @@ export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
 export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
-export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8,16,32,64}"
+export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
-export CUDA_GRAPHS="${CUDA_GRAPHS:-1}"
+export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
+export DTYPE="${DTYPE:-bfloat16}"
+export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
 
 exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --lifespan on --log-level debug
