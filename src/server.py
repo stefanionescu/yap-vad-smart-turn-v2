@@ -32,7 +32,6 @@ def _parse_buckets(val: str) -> list[int]:
 
 BATCH_BUCKETS = _parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8"))
 USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
-USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 
 # -------- Device / precision ----------
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -70,7 +69,7 @@ def _auth_ok(request: Request) -> bool:
     header = request.headers.get("authorization") or request.headers.get("Authorization")
     return isinstance(header, str) and header.strip() == f"Key {AUTH_KEY}"
 
-def _make_inputs_gpu(x: torch.Tensor, cast_to: torch.dtype | None = None) -> Dict[str, torch.Tensor]:
+def _make_inputs_gpu(x: torch.Tensor, cast_to: torch.dtype | None = None) -> dict[str, torch.Tensor]:
     """
     Processorless path: we already feed normalized mono PCM @ 16k, padded to MAX_SAMPLES.
     Create attention_mask of ones and (optionally) cast input_values to match model dtype.
