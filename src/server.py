@@ -1,3 +1,4 @@
+# src/server.py
 import os, io, time, asyncio
 from typing import List, Dict, Tuple
 from contextlib import contextmanager
@@ -18,29 +19,27 @@ from .constants import (
     MICRO_BATCH_WINDOW_MS, AUTH_KEY, MODEL_ID,
 )
 
-# add this near your other imports
+# Be resilient: never crash the server if compile fails
 import torch._dynamo as dynamo
-
-# be resilient to graph/compile weirdness (do not crash the server)
 dynamo.config.suppress_errors = True
 
-# must be set before first compiled call
+# Avoid nested cudagraphs inside torch.compile; we manage graphs manually
 try:
     import torch._inductor.config as inductor_cfg
-    # avoid nested cudagraphs inside torch.compile; we'll manage graphs manually
     inductor_cfg.triton.cudagraphs = False
 except Exception:
     pass
 
 # -------- Configurable buckets (1..64 by default) ----------
 def _parse_buckets(val: str) -> list[int]:
-    try: return [int(x) for x in val.split(",") if x.strip()]
-    except: return [1,2,4,8,16,32,64]
+    try:
+        return [int(x) for x in val.split(",") if x.strip()]
+    except Exception:
+        return [1, 2, 4, 8, 16, 32, 64]
 
 BATCH_BUCKETS = _parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8,16,32,64"))
 USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 USE_CUDA_GRAPHS  = os.environ.get("CUDA_GRAPHS", "1") == "1"
-CAPTURE_ALL      = os.environ.get("CAPTURE_ALL", "1") == "1"
 CAPTURE_CONCURRENCY = int(os.environ.get("CAPTURE_CONCURRENCY", "1"))
 
 # -------- Device / precision ----------
@@ -48,7 +47,6 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 torch.set_grad_enabled(False)
 torch.set_num_threads(2)
 try:
-    # L40/L4: TF32 helps a lot
     torch.backends.cuda.matmul.allow_tf32 = True
 except Exception:
     pass
@@ -57,42 +55,35 @@ torch.set_float32_matmul_precision("high")
 MAX_SAMPLES = SAMPLE_RATE * int(float(os.environ.get("MAX_SECS", str(MAX_SECS))))
 
 # -------- State ----------
-# Track three models explicitly
-_ACTIVE_MODEL: torch.nn.Module | None = None      # used for serving (eager first, then compiled)
-_COMPILED_MODEL: torch.nn.Module | None = None    # compiled module (background)
+_ACTIVE_MODEL: torch.nn.Module | None = None      # serves requests (eager first, then compiled)
+_COMPILED_MODEL: torch.nn.Module | None = None
 _COMPILED_READY = False
 
-_EAGER_MODEL: torch.nn.Module | None = None       # plain eager module for serving
-_GRAPH_MODEL: torch.nn.Module | None = None       # plain eager module used ONLY for CUDA graphs
+_EAGER_MODEL: torch.nn.Module | None = None       # plain eager for serving until compiled swaps in
+_GRAPH_MODEL: torch.nn.Module | None = None       # plain eager used ONLY for CUDA graphs
 
 # CUDA-graphs per bucket: bucket -> (graph, logits_ref, static_inputs)
 GRAPHS: Dict[int, Tuple[torch.cuda.CUDAGraph, torch.Tensor, Dict[str, torch.Tensor]]] = {}
 CAPTURED: set[int] = set()
 CAPTURING: set[int] = set()
 
-# Capture concurrency control (create ONCE; no races)
-_CAPTURE_SEM = asyncio.Semaphore(int(os.environ.get("CAPTURE_CONCURRENCY", "1")))
-
-@contextmanager
-def _no_empty_cache_during_capture():
-    """Torch calls empty_cache() inside the graph ctx enter; avoid allocator assert."""
-    orig = torch.cuda.empty_cache
-    try:
-        torch.cuda.empty_cache = lambda: None
-        yield
-    finally:
-        torch.cuda.empty_cache = orig
+# Capture concurrency control (single-flight by default)
+_CAPTURE_SEM = asyncio.Semaphore(CAPTURE_CONCURRENCY)
 
 # -------- Helpers ----------
 def _ensure_16k(arr: np.ndarray) -> np.ndarray:
-    if arr.dtype != np.float32: arr = arr.astype(np.float32, copy=False)
+    if arr.dtype != np.float32:
+        arr = arr.astype(np.float32, copy=False)
     arr = np.ravel(arr)
-    if arr.size > MAX_SAMPLES: arr = arr[:MAX_SAMPLES]  # first N seconds
-    elif arr.size < MAX_SAMPLES: arr = np.pad(arr, (0, MAX_SAMPLES - arr.size))
+    if arr.size > MAX_SAMPLES:
+        arr = arr[:MAX_SAMPLES]
+    elif arr.size < MAX_SAMPLES:
+        arr = np.pad(arr, (0, MAX_SAMPLES - arr.size))
     return arr
 
 def _auth_ok(request: Request) -> bool:
-    if not AUTH_KEY: return True
+    if not AUTH_KEY:
+        return True
     header = request.headers.get("authorization") or request.headers.get("Authorization")
     return isinstance(header, str) and header.strip() == f"Key {AUTH_KEY}"
 
@@ -106,7 +97,6 @@ def _make_inputs_gpu(x: torch.Tensor, cast_to: torch.dtype | None = None) -> Dic
     if cast_to is not None and x.dtype != cast_to:
         x = x.to(cast_to)
 
-    # attention_mask: ones (fixed length = MAX_SAMPLES)
     attn = torch.ones((x.shape[0], x.shape[1]), dtype=torch.long, device=DEVICE)
     return {"input_values": x, "attention_mask": attn}
 
@@ -122,8 +112,7 @@ def _build_eager_if_needed():
         logger.info("Eager model built and set ACTIVE.")
 
 async def _compile_in_background():
-    """Compile a separate model instance and warm it once so it's truly ready.
-       Then atomically swap in as ACTIVE and free the eager model."""
+    """Compile a separate model and warm it once, then atomically swap it in."""
     global _COMPILED_MODEL, _ACTIVE_MODEL, _COMPILED_READY
     if not USE_TORCH_COMPILE or DEVICE.type != "cuda":
         logger.info("torch.compile disabled or no CUDA; skipping compile.")
@@ -131,20 +120,23 @@ async def _compile_in_background():
     try:
         logger.info("Background: building compiled model...")
         m = Wav2Vec2ForEndpointing.from_pretrained(MODEL_ID).to(DEVICE)
-        # cast dtype if requested
-        if DTYPE != torch.float32: m = m.to(dtype=DTYPE)
+        if DTYPE != torch.float32:
+            m = m.to(dtype=DTYPE)
         m.eval()
         m = torch.compile(m, mode="reduce-overhead")
-        # warm once to trigger actual compile
+
+        # Warm compile path with static-sized input
         warm = torch.zeros((1, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-        inp = _make_inputs_gpu(warm)
+        inp = _make_inputs_gpu(warm, cast_to=(DTYPE if DTYPE != torch.float32 else None))
         with torch.no_grad():
-            if DTYPE != torch.float32:
+            if DEVICE.type == "cuda" and DTYPE != torch.float32:
                 with torch.autocast("cuda", dtype=DTYPE):
                     _ = m(**inp)
             else:
                 _ = m(**inp)
-        if DEVICE.type == "cuda": torch.cuda.synchronize()
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
+
         _COMPILED_MODEL = m
         _COMPILED_READY = True
         _ACTIVE_MODEL = _COMPILED_MODEL
@@ -155,7 +147,6 @@ async def _compile_in_background():
 async def _ensure_graph_model():
     global _GRAPH_MODEL
     if _GRAPH_MODEL is None:
-        # note: fresh eager copy; do NOT torch.compile
         m = Wav2Vec2ForEndpointing.from_pretrained(MODEL_ID).to(DEVICE)
         if DTYPE != torch.float32:
             m = m.to(dtype=DTYPE)
@@ -163,11 +154,22 @@ async def _ensure_graph_model():
         _GRAPH_MODEL = m
         logger.info("Graph model (eager) built for CUDA graphs.")
 
+@contextmanager
+def _no_empty_cache_during_capture():
+    """Torch calls empty_cache() at graph enter; silence it to avoid allocator assert."""
+    orig = torch.cuda.empty_cache
+    try:
+        torch.cuda.empty_cache = lambda: None
+        yield
+    finally:
+        torch.cuda.empty_cache = orig
+
 async def _capture_bucket(bucket: int):
     if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
         return
     if bucket in CAPTURED or bucket in CAPTURING:
         return
+
     CAPTURING.add(bucket)
     try:
         async with _CAPTURE_SEM:
@@ -175,14 +177,13 @@ async def _capture_bucket(bucket: int):
             m = _GRAPH_MODEL
 
             logger.info(f"CUDA graph capture: bucket={bucket} starting...")
-            
-            # build static inputs for this bucket
-            x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
 
+            # Static inputs for this bucket
+            x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
             need_cast = (DTYPE != torch.float32)
             inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
 
-            # warm eager call (on default stream) to settle kernels
+            # Warm once on default stream to settle kernels
             with torch.no_grad():
                 if need_cast:
                     with torch.autocast("cuda", dtype=DTYPE):
@@ -192,13 +193,11 @@ async def _capture_bucket(bucket: int):
             if DEVICE.type == "cuda":
                 torch.cuda.synchronize()
 
-            # dedicate a private stream for capture
+            # Capture on a private stream
             cap_stream = torch.cuda.Stream()
             g = torch.cuda.CUDAGraph()
 
-            # ensure ordering
             cap_stream.wait_stream(torch.cuda.current_stream())
-
             with torch.cuda.stream(cap_stream):
                 # pre-warm again on the capture stream
                 with torch.no_grad():
@@ -209,7 +208,6 @@ async def _capture_bucket(bucket: int):
                         _ = m(**inp)
                 torch.cuda.synchronize()
 
-                # actual capture — silence empty_cache to avoid allocator assert
                 with _no_empty_cache_during_capture():
                     with torch.cuda.graph(g):
                         if need_cast:
@@ -234,7 +232,7 @@ def _kickoff_all_captures():
         return
     logger.info(f"Starting background graph capture for buckets={BATCH_BUCKETS}")
     for b in BATCH_BUCKETS:
-        asyncio.create_task(_capture_bucket(b))  # do NOT await
+        asyncio.create_task(_capture_bucket(b))
 
 # -------- FastAPI app & queue ----------
 app = FastAPI()
@@ -288,10 +286,11 @@ async def _batcher():
         logits = None
 
         try:
-            # Choose path: GRAPHS (fastest) → COMPILED → EAGER
+            # Fast path: replay CUDA graph if captured
             if USE_CUDA_GRAPHS and bucket in GRAPHS and DEVICE.type == "cuda":
                 logger.debug(f"batcher: replay graph bucket={bucket}")
                 g, logits_ref, inp = GRAPHS[bucket]
+
                 # pad to bucket for static graph
                 if batch.shape[0] < bucket:
                     pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
@@ -300,7 +299,7 @@ async def _batcher():
                 else:
                     batch_b = batch
 
-                # make sure the tensor you copy into static input matches captured dtype
+                # inputs must match captured dtype
                 copy_src = batch_b if DTYPE == torch.float32 else batch_b.to(dtype=DTYPE)
                 inp["input_values"].copy_(copy_src)
                 inp["attention_mask"].fill_(1)
@@ -316,7 +315,7 @@ async def _batcher():
 
                 m = _ACTIVE_MODEL
                 logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
-                inp = _make_inputs_gpu(batch)
+                inp = _make_inputs_gpu(batch, cast_to=(DTYPE if DTYPE != torch.float32 else None))
                 with torch.no_grad():
                     if DEVICE.type == "cuda" and DTYPE != torch.float32:
                         with torch.autocast("cuda", dtype=DTYPE):
@@ -329,12 +328,12 @@ async def _batcher():
             t1 = time.perf_counter()
             logger.debug(f"batcher: forward done in {(t1-t0)*1000:.1f} ms")
 
-        for it, p in zip(items, probs):
-            pred = 1 if p > THRESHOLD else 0
+            for it, p in zip(items, probs):
+                pred = 1 if p > THRESHOLD else 0
                 if not it.fut.done():
                     it.fut.set_result({
-                "prediction": int(pred),
-                "probability": float(p),
+                        "prediction": int(pred),
+                        "probability": float(p),
                         "metrics": {"inference_time": (t1 - t0), "total_time": (t1 - it.t_start_total)},
                     })
 
@@ -342,7 +341,7 @@ async def _batcher():
             logger.exception(f"batcher: inference failed: {e}")
             now = time.perf_counter()
             for it in items:
-            if not it.fut.done():
+                if not it.fut.done():
                     it.fut.set_result({
                         "prediction": 0, "probability": 0.0,
                         "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
@@ -352,9 +351,9 @@ async def _batcher():
 @app.on_event("startup")
 async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
-    # NOTE: we don't pre-load here; first request builds eager model once.
     asyncio.create_task(_batcher())
     _kickoff_all_captures()   # kick off all bucket captures in background
+
     # mark ready file
     try:
         root = Path(__file__).resolve().parents[1]
