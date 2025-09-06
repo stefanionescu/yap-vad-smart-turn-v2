@@ -69,8 +69,8 @@ GRAPHS: Dict[int, Tuple[torch.cuda.CUDAGraph, torch.Tensor, Dict[str, torch.Tens
 CAPTURED: set[int] = set()
 CAPTURING: set[int] = set()
 
-# Capture concurrency control
-_CAPTURE_SEM: asyncio.Semaphore | None = None
+# Capture concurrency control (create ONCE; no races)
+_CAPTURE_SEM = asyncio.Semaphore(int(os.environ.get("CAPTURE_CONCURRENCY", "1")))
 
 # -------- Helpers ----------
 def _ensure_16k(arr: np.ndarray) -> np.ndarray:
@@ -153,17 +153,12 @@ async def _ensure_graph_model():
         logger.info("Graph model (eager) built for CUDA graphs.")
 
 async def _capture_bucket(bucket: int):
-    global _CAPTURE_SEM
     if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
         return
     if bucket in CAPTURED or bucket in CAPTURING:
         return
     CAPTURING.add(bucket)
     try:
-        # Initialize semaphore if needed
-        if _CAPTURE_SEM is None:
-            _CAPTURE_SEM = asyncio.Semaphore(CAPTURE_CONCURRENCY)
-            
         async with _CAPTURE_SEM:
             await _ensure_graph_model()
             m = _GRAPH_MODEL
@@ -176,7 +171,7 @@ async def _capture_bucket(bucket: int):
             need_cast = (DTYPE != torch.float32)
             inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
 
-            # warm eager call to settle kernels before capture
+            # warm eager call (on default stream) to settle kernels
             with torch.no_grad():
                 if need_cast:
                     with torch.autocast("cuda", dtype=DTYPE):
@@ -186,15 +181,34 @@ async def _capture_bucket(bucket: int):
             if DEVICE.type == "cuda":
                 torch.cuda.synchronize()
 
-            # capture under the same dtype regime
+            # capture on a private stream
+            capture_stream = torch.cuda.Stream()
             g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g):
-                if need_cast:
-                    with torch.autocast("cuda", dtype=DTYPE):
+
+            # make sure the capture stream sees all prior work
+            capture_stream.wait_stream(torch.cuda.current_stream())
+
+            with torch.cuda.stream(capture_stream):
+                # one more warm call on the capture stream
+                with torch.no_grad():
+                    if need_cast:
+                        with torch.autocast("cuda", dtype=DTYPE):
+                            _ = m(**inp)
+                    else:
+                        _ = m(**inp)
+                torch.cuda.synchronize()
+
+                # the actual capture (uses current stream)
+                with torch.cuda.graph(g):
+                    if need_cast:
+                        with torch.autocast("cuda", dtype=DTYPE):
+                            out = m(**inp)
+                    else:
                         out = m(**inp)
-                else:
-                    out = m(**inp)
-                logits_ref = out["logits"] if isinstance(out, dict) else out.logits
+                    logits_ref = out["logits"] if isinstance(out, dict) else out.logits
+
+            # back to default stream
+            torch.cuda.current_stream().wait_stream(capture_stream)
 
             GRAPHS[bucket] = (g, logits_ref, inp)
             CAPTURED.add(bucket)
@@ -243,11 +257,11 @@ async def _batcher():
         # Build batch tensor on GPU
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
-            batch = torch.from_numpy(np_stack)
-            if DEVICE.type == "cuda":
-                batch = batch.pin_memory().to(DEVICE, non_blocking=True)
-            else:
-                batch = batch.to(DEVICE)
+        batch = torch.from_numpy(np_stack)
+        if DEVICE.type == "cuda":
+            batch = batch.pin_memory().to(DEVICE, non_blocking=True)
+        else:
+            batch = batch.to(DEVICE)
         except Exception as e:
             logger.exception(f"batcher: failed to build batch tensor: {e}")
             now = time.perf_counter()
@@ -303,13 +317,13 @@ async def _batcher():
             probs = logits.detach().float().cpu().numpy().reshape(-1)
             t1 = time.perf_counter()
             logger.debug(f"batcher: forward done in {(t1-t0)*1000:.1f} ms")
-            
-            for it, p in zip(items, probs):
-                pred = 1 if p > THRESHOLD else 0
+
+        for it, p in zip(items, probs):
+            pred = 1 if p > THRESHOLD else 0
                 if not it.fut.done():
                     it.fut.set_result({
-                        "prediction": int(pred),
-                        "probability": float(p),
+                "prediction": int(pred),
+                "probability": float(p),
                         "metrics": {"inference_time": (t1 - t0), "total_time": (t1 - it.t_start_total)},
                     })
 
@@ -317,7 +331,7 @@ async def _batcher():
             logger.exception(f"batcher: inference failed: {e}")
             now = time.perf_counter()
             for it in items:
-                if not it.fut.done():
+            if not it.fut.done():
                     it.fut.set_result({
                         "prediction": 0, "probability": 0.0,
                         "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
