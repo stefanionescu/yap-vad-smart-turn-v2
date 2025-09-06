@@ -40,9 +40,9 @@ mkdir -p logs .hf .run samples
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf}"
 unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
-export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8,16,32,64}"
+export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
-export CUDA_GRAPHS="${CUDA_GRAPHS:-1}"
+export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
 
 MODEL_ID="${MODEL_ID:-pipecat-ai/smart-turn-v2}"
 python - <<PY
