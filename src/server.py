@@ -73,6 +73,8 @@ class Item:
 QUEUE: asyncio.Queue[Item] = asyncio.Queue()
 
 
+
+
 def _ensure_16k_float32_1d(arr: np.ndarray) -> np.ndarray:
     # Expect float32 mono PCM @ 16k from Pipecat. Clamp/pad to MAX_SAMPLES.
     if arr.dtype != np.float32:
@@ -93,51 +95,11 @@ def _auth_ok(request: Request) -> bool:
 
 
 async def _batcher():
-    """Micro-batch loop. Every MICRO_BATCH_WINDOW_MS, drain queue up to max bucket,
-    run one forward pass, and set each future with result.
-    """
-    if DEVICE.type == "cuda":
-        # Warmup with a fixed shape. This improves first-request latency and stabilizes kernels.
-        warm = torch.zeros((1, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-        warm_inputs = processor(
-            warm,
-            sampling_rate=SAMPLE_RATE,
-            padding="max_length",
-            truncation=True,
-            max_length=MAX_SAMPLES,
-            return_attention_mask=True,
-            return_tensors="pt",
-        )
-        warm_inputs = {k: v.to(DEVICE) for k, v in warm_inputs.items()}
-        with torch.no_grad(), torch.autocast("cuda", dtype=DTYPE, enabled=(DTYPE != torch.float32)):
-            _ = model(**warm_inputs)
+    """Micro-batcher. No warmup. Lazy CUDA-graph capture per bucket on first use."""
+    await asyncio.sleep(0)  # let uvicorn finish binding
 
+    # bucket_size -> (graph, logits_ref, static_inputs)
     graphs = {}
-    static_inputs = {}
-    if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-        torch.cuda.synchronize()
-        for b in BATCH_BUCKETS:
-            x = torch.zeros((b, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-            inp = processor(
-                x,
-                sampling_rate=SAMPLE_RATE,
-                padding="max_length",
-                truncation=True,
-                max_length=MAX_SAMPLES,
-                return_attention_mask=True,
-                return_tensors="pt",
-            )
-            inp = {k: v.to(DEVICE) for k, v in inp.items()}
-            g = torch.cuda.CUDAGraph()
-            out_logits_ref = None
-            torch.cuda.synchronize()
-            with torch.cuda.graph(g):
-                out = model(**inp)
-                out_logits_ref = out.logits
-            graphs[b] = (g, out_logits_ref)
-            static_inputs[b] = inp
-        torch.cuda.synchronize()
-        logger.info(f"CUDA Graphs captured for batch sizes: {BATCH_BUCKETS}")
 
     while True:
         await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
@@ -161,16 +123,18 @@ async def _batcher():
 
         t0_inf = time.perf_counter()
 
-        if USE_CUDA_GRAPHS and DEVICE.type == "cuda" and bucket in graphs and batch.shape[0] == bucket:
-            # Replace input values inside static graph inputs and replay
-            inp = static_inputs[bucket]
-            # For Wav2Vec-style processors, input tensor key is usually "input_values"
-            if "input_values" in inp:
+        if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
+            if bucket in graphs and batch.shape[0] == bucket:
+                # fast path: replay captured graph
+                g, logits_ref, inp = graphs[bucket]
                 inp["input_values"].copy_(batch)
+                g.replay()
+                logits = logits_ref
             else:
-                # Fallback: re-tokenize if processor layout unexpected
+                # lazy capture for this bucket, then replay with the real batch
+                x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
                 inp = processor(
-                    batch,
+                    x,
                     sampling_rate=SAMPLE_RATE,
                     padding="max_length",
                     truncation=True,
@@ -179,9 +143,16 @@ async def _batcher():
                     return_tensors="pt",
                 )
                 inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-            g, out_logits_ref = graphs[bucket]
-            g.replay()
-            probs = out_logits_ref.detach().float().cpu().numpy().reshape(-1)
+                g = torch.cuda.CUDAGraph()
+                torch.cuda.synchronize()
+                with torch.cuda.graph(g):
+                    out = model(**inp)
+                    logits_ref = out.logits
+                graphs[bucket] = (g, logits_ref, inp)
+                # now plug real batch and replay
+                inp["input_values"].copy_(batch)
+                g.replay()
+                logits = logits_ref
         else:
             # Tokenize per batch (CPU-bound but lightweight)
             inp = processor(
@@ -195,15 +166,16 @@ async def _batcher():
             )
             inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
 
-            if DEVICE.type == "cuda":
-                with torch.no_grad(), torch.autocast("cuda", dtype=DTYPE, enabled=(DTYPE != torch.float32)):
+            with torch.no_grad():
+                if DEVICE.type == "cuda" and DTYPE != torch.float32:
+                    with torch.autocast("cuda", dtype=DTYPE):
+                        out = model(**inp)
+                else:
                     out = model(**inp)
-            else:
-                with torch.no_grad():
-                    out = model(**inp)
-            # Smart Turn v2 README: logits already are sigmoid probabilities (0..1)
             logits = out.logits
-            probs = logits.detach().float().cpu().numpy().reshape(-1)
+
+        # logits → probs
+        probs = logits.detach().float().cpu().numpy().reshape(-1)
 
         t1_inf = time.perf_counter()
 

@@ -23,6 +23,7 @@ nohup python -m uvicorn src.server:app \
   --host 0.0.0.0 \
   --port "$PORT" \
   --workers 1 \
+  --lifespan on \
   --log-level debug \
   > "$ROOT_DIR/logs/server.log" 2>&1 &
 

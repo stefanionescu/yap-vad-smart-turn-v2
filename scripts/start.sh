@@ -12,4 +12,4 @@ export MKL_NUM_THREADS=2
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export TOKENIZERS_PARALLELISM=false
 
-exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --log-level debug
+exec python -m uvicorn src.server:app --host 0.0.0.0 --port 8000 --workers 1 --lifespan on --log-level debug
