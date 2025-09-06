@@ -17,6 +17,12 @@ from .constants import (
     MICRO_BATCH_WINDOW_MS, AUTH_KEY, MODEL_ID,
 )
 
+# add this near your other imports
+import torch._dynamo as dynamo
+
+# be resilient to graph/compile weirdness (do not crash the server)
+dynamo.config.suppress_errors = True
+
 # must be set before first compiled call
 try:
     import torch._inductor.config as inductor_cfg
@@ -63,6 +69,9 @@ GRAPHS: Dict[int, Tuple[torch.cuda.CUDAGraph, torch.Tensor, Dict[str, torch.Tens
 CAPTURED: set[int] = set()
 CAPTURING: set[int] = set()
 
+# Capture concurrency control
+_CAPTURE_SEM: asyncio.Semaphore | None = None
+
 # -------- Helpers ----------
 def _ensure_16k(arr: np.ndarray) -> np.ndarray:
     if arr.dtype != np.float32: arr = arr.astype(np.float32, copy=False)
@@ -77,20 +86,18 @@ def _auth_ok(request: Request) -> bool:
     return isinstance(header, str) and header.strip() == f"Key {AUTH_KEY}"
 
 def _make_inputs_gpu(x: torch.Tensor, cast_to: torch.dtype | None = None) -> Dict[str, torch.Tensor]:
-    """Tokenize on CPU, move to GPU, optionally cast input_values dtype."""
-    inp = processor(
-        x,
-        sampling_rate=SAMPLE_RATE,
-        padding="max_length",
-        truncation=True,
-        max_length=MAX_SAMPLES,
-        return_attention_mask=True,
-        return_tensors="pt",
-    )
-    inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-    if cast_to is not None and "input_values" in inp:
-        inp["input_values"] = inp["input_values"].to(cast_to)
-    return inp
+    """
+    Processorless path: we already feed normalized mono PCM @ 16k, padded to MAX_SAMPLES.
+    Create attention_mask of ones and (optionally) cast input_values to match model dtype.
+    """
+    if x.device != DEVICE:
+        x = x.to(DEVICE, non_blocking=True)
+    if cast_to is not None and x.dtype != cast_to:
+        x = x.to(cast_to)
+
+    # attention_mask: ones (fixed length = MAX_SAMPLES)
+    attn = torch.ones((x.shape[0], x.shape[1]), dtype=torch.long, device=DEVICE)
+    return {"input_values": x, "attention_mask": attn}
 
 def _build_eager_if_needed():
     global _EAGER_MODEL, _ACTIVE_MODEL
@@ -146,47 +153,52 @@ async def _ensure_graph_model():
         logger.info("Graph model (eager) built for CUDA graphs.")
 
 async def _capture_bucket(bucket: int):
+    global _CAPTURE_SEM
     if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
         return
     if bucket in CAPTURED or bucket in CAPTURING:
         return
     CAPTURING.add(bucket)
     try:
-        await _ensure_graph_model()
-        m = _GRAPH_MODEL
+        # Initialize semaphore if needed
+        if _CAPTURE_SEM is None:
+            _CAPTURE_SEM = asyncio.Semaphore(CAPTURE_CONCURRENCY)
+            
+        async with _CAPTURE_SEM:
+            await _ensure_graph_model()
+            m = _GRAPH_MODEL
 
-        logger.info(f"CUDA graph capture: bucket={bucket} starting...")
-        
-        # build static inputs for this bucket
-        x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+            logger.info(f"CUDA graph capture: bucket={bucket} starting...")
+            
+            # build static inputs for this bucket
+            x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
 
-        # for BF16 weights, either cast inputs to BF16 OR use autocast during capture
-        need_cast = (DTYPE != torch.float32)
-        inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
+            need_cast = (DTYPE != torch.float32)
+            inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
 
-        # warm eager call to settle kernels
-        with torch.no_grad():
-            if need_cast:
-                with torch.autocast("cuda", dtype=DTYPE):
+            # warm eager call to settle kernels before capture
+            with torch.no_grad():
+                if need_cast:
+                    with torch.autocast("cuda", dtype=DTYPE):
+                        _ = m(**inp)
+                else:
                     _ = m(**inp)
-            else:
-                _ = m(**inp)
-        if DEVICE.type == "cuda":
-            torch.cuda.synchronize()
+            if DEVICE.type == "cuda":
+                torch.cuda.synchronize()
 
-        # capture under the same dtype regime
-        g = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(g):
-            if need_cast:
-                with torch.autocast("cuda", dtype=DTYPE):
+            # capture under the same dtype regime
+            g = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(g):
+                if need_cast:
+                    with torch.autocast("cuda", dtype=DTYPE):
+                        out = m(**inp)
+                else:
                     out = m(**inp)
-            else:
-                out = m(**inp)
-            logits_ref = out["logits"] if isinstance(out, dict) else out.logits
+                logits_ref = out["logits"] if isinstance(out, dict) else out.logits
 
-        GRAPHS[bucket] = (g, logits_ref, inp)
-        CAPTURED.add(bucket)
-        logger.info(f"CUDA graph capture: bucket={bucket} DONE.")
+            GRAPHS[bucket] = (g, logits_ref, inp)
+            CAPTURED.add(bucket)
+            logger.info(f"CUDA graph capture: bucket={bucket} DONE.")
     except Exception as e:
         logger.exception(f"CUDA graph capture failed for bucket={bucket}: {e}")
     finally:
@@ -231,11 +243,11 @@ async def _batcher():
         # Build batch tensor on GPU
         try:
             np_stack = np.stack([it.arr for it in items], axis=0).astype(np.float32, copy=False)
-            batch = torch.from_numpy(np_stack)
-            if DEVICE.type == "cuda":
-                batch = batch.pin_memory().to(DEVICE, non_blocking=True)
-            else:
-                batch = batch.to(DEVICE)
+        batch = torch.from_numpy(np_stack)
+        if DEVICE.type == "cuda":
+            batch = batch.pin_memory().to(DEVICE, non_blocking=True)
+        else:
+            batch = batch.to(DEVICE)
         except Exception as e:
             logger.exception(f"batcher: failed to build batch tensor: {e}")
             now = time.perf_counter()
@@ -262,7 +274,7 @@ async def _batcher():
                     batch_b = pad
                 else:
                     batch_b = batch
-                
+
                 # make sure the tensor you copy into static input matches captured dtype
                 copy_src = batch_b if DTYPE == torch.float32 else batch_b.to(dtype=DTYPE)
                 inp["input_values"].copy_(copy_src)
@@ -291,13 +303,13 @@ async def _batcher():
             probs = logits.detach().float().cpu().numpy().reshape(-1)
             t1 = time.perf_counter()
             logger.debug(f"batcher: forward done in {(t1-t0)*1000:.1f} ms")
-            
-            for it, p in zip(items, probs):
-                pred = 1 if p > THRESHOLD else 0
+
+        for it, p in zip(items, probs):
+            pred = 1 if p > THRESHOLD else 0
                 if not it.fut.done():
                     it.fut.set_result({
-                        "prediction": int(pred),
-                        "probability": float(p),
+                "prediction": int(pred),
+                "probability": float(p),
                         "metrics": {"inference_time": (t1 - t0), "total_time": (t1 - it.t_start_total)},
                     })
 
@@ -305,7 +317,7 @@ async def _batcher():
             logger.exception(f"batcher: inference failed: {e}")
             now = time.perf_counter()
             for it in items:
-                if not it.fut.done():
+            if not it.fut.done():
                     it.fut.set_result({
                         "prediction": 0, "probability": 0.0,
                         "metrics": {"inference_time": 0.0, "total_time": now - it.t_start_total},
@@ -317,6 +329,7 @@ async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
     # NOTE: we don't pre-load here; first request builds eager model once.
     asyncio.create_task(_batcher())
+    _kickoff_all_captures()   # kick off all bucket captures in background
     # mark ready file
     try:
         root = Path(__file__).resolve().parents[1]
