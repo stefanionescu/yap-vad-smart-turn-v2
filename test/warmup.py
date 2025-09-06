@@ -1,20 +1,9 @@
-import argparse, io, os, asyncio, numpy as np
-import aiohttp, torch, torchaudio
+import argparse, io, os, sys, asyncio, numpy as np
+import aiohttp
 
-SR = 16000
-
-def load_first_seconds(path: str, seconds: float) -> np.ndarray:
-    wav, sr = torchaudio.load(path)          # (C, T), float32/float64
-    if wav.shape[0] > 1:
-        wav = wav.mean(dim=0, keepdim=True)  # mono
-    if sr != SR:
-        wav = torchaudio.transforms.Resample(sr, SR)(wav)
-    T = int(SR * seconds)
-    wav = wav[:, :T]
-    if wav.shape[1] < T:
-        pad = torch.zeros(1, T - wav.shape[1], dtype=wav.dtype)
-        wav = torch.cat([wav, pad], dim=1)
-    return wav.squeeze(0).to(torch.float32).numpy()
+# Allow importing utils from same directory
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils import load_audio_from_samples
 
 async def main():
     ap = argparse.ArgumentParser()
@@ -25,18 +14,12 @@ async def main():
     ap.add_argument("--timeout", type=float, default=10)  # allow first-hit compile+capture
     args = ap.parse_args()
 
-    # Smart path resolution: if file doesn't exist, try samples/ prefix
-    sample_path = args.sample
-    if not os.path.exists(sample_path) and not os.path.isabs(sample_path):
-        # Try samples/ prefix
-        prefixed_path = f"samples/{sample_path}"
-        if os.path.exists(prefixed_path):
-            sample_path = prefixed_path
-        else:
-            print(f"Warning: Neither '{sample_path}' nor '{prefixed_path}' found")
-
-    arr = load_first_seconds(sample_path, args.seconds)
-    buf = io.BytesIO(); np.save(buf, arr)
+    # Use utils.py for consistent audio loading
+    try:
+        arr, body = load_audio_from_samples(args.sample, seconds_pad_to=int(args.seconds))
+    except FileNotFoundError:
+        print(f"Error: Sample '{args.sample}' not found in samples/ directory")
+        return
 
     headers = {"Content-Type": "application/octet-stream"}
     if args.key:
@@ -44,7 +27,7 @@ async def main():
 
     timeout = aiohttp.ClientTimeout(total=args.timeout)
     async with aiohttp.ClientSession(timeout=timeout) as s:
-        async with s.post(args.url, data=buf.getvalue(), headers=headers) as r:
+        async with s.post(args.url, data=body, headers=headers) as r:
             r.raise_for_status()
             print(await r.json())
 

@@ -4,8 +4,12 @@ import aiohttp
 import io
 import numpy as np
 import os
+import sys
 from dotenv import load_dotenv
-from .utils import load_audio_from_samples
+
+# Allow importing utils from same directory
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+from utils import load_audio_from_samples
 
 
 load_dotenv(override=True)

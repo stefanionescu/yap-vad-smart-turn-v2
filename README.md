@@ -96,7 +96,7 @@ source venv/bin/activate
 
 ```bash
 # Quiet mode (default - no debug logs)
-python3 test/warmup.py --sample mid.wav --seconds 8
+python3 ./test/warmup.py --sample mid.wav --seconds 8
 
 # With debug logs
 LOG_LEVEL=DEBUG python3 test/warmup.py --sample mid.wav --seconds 8
@@ -105,7 +105,7 @@ LOG_LEVEL=DEBUG python3 test/warmup.py --sample mid.wav --seconds 8
 - Bench (total requests and concurrency):
 
 ```bash
-python3 test/bench.py --sample mid.wav --seconds 8 --requests 8 --concurrency 8
+python3 ./test/bench.py --sample mid.wav --seconds 8 --requests 8 --concurrency 8
 ```
 
 - Client (reads `.env` for `RUNPOD_TCP_HOST`, `RUNPOD_TCP_PORT`, `AUTH_KEY`):
