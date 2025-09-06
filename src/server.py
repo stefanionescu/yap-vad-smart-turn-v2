@@ -76,10 +76,21 @@ def _auth_ok(request: Request) -> bool:
     header = request.headers.get("authorization") or request.headers.get("Authorization")
     return isinstance(header, str) and header.strip() == f"Key {AUTH_KEY}"
 
-def _make_inputs_gpu(x: torch.Tensor) -> Dict[str, torch.Tensor]:
-    # x: (B, T) float32 on DEVICE, already clamped/padded
-    attn = torch.ones((x.shape[0], x.shape[1]), dtype=torch.long, device=x.device)
-    return {"input_values": x, "attention_mask": attn}
+def _make_inputs_gpu(x: torch.Tensor, cast_to: torch.dtype | None = None) -> Dict[str, torch.Tensor]:
+    """Tokenize on CPU, move to GPU, optionally cast input_values dtype."""
+    inp = processor(
+        x,
+        sampling_rate=SAMPLE_RATE,
+        padding="max_length",
+        truncation=True,
+        max_length=MAX_SAMPLES,
+        return_attention_mask=True,
+        return_tensors="pt",
+    )
+    inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+    if cast_to is not None and "input_values" in inp:
+        inp["input_values"] = inp["input_values"].to(cast_to)
+    return inp
 
 def _build_eager_if_needed():
     global _EAGER_MODEL, _ACTIVE_MODEL
@@ -145,21 +156,32 @@ async def _capture_bucket(bucket: int):
         m = _GRAPH_MODEL
 
         logger.info(f"CUDA graph capture: bucket={bucket} starting...")
+        
+        # build static inputs for this bucket
         x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-        inp = _make_inputs_gpu(x)
 
-        # eager warm
+        # for BF16 weights, either cast inputs to BF16 OR use autocast during capture
+        need_cast = (DTYPE != torch.float32)
+        inp = _make_inputs_gpu(x, cast_to=(DTYPE if need_cast else None))
+
+        # warm eager call to settle kernels
         with torch.no_grad():
-            if DTYPE != torch.float32:
+            if need_cast:
                 with torch.autocast("cuda", dtype=DTYPE):
                     _ = m(**inp)
             else:
                 _ = m(**inp)
-        torch.cuda.synchronize()
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
 
+        # capture under the same dtype regime
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
-            out = m(**inp)
+            if need_cast:
+                with torch.autocast("cuda", dtype=DTYPE):
+                    out = m(**inp)
+            else:
+                out = m(**inp)
             logits_ref = out["logits"] if isinstance(out, dict) else out.logits
 
         GRAPHS[bucket] = (g, logits_ref, inp)
@@ -170,13 +192,12 @@ async def _capture_bucket(bucket: int):
     finally:
         CAPTURING.discard(bucket)
 
-async def _capture_all_buckets():
+def _kickoff_all_captures():
     if not (USE_CUDA_GRAPHS and DEVICE.type == "cuda"):
         return
-    # optional: wait until compiled ready if you prefer compiled for uncaptured sizes
     logger.info(f"Starting background graph capture for buckets={BATCH_BUCKETS}")
-    tasks = [asyncio.create_task(_capture_bucket(b)) for b in BATCH_BUCKETS]
-    await asyncio.gather(*tasks, return_exceptions=True)
+    for b in BATCH_BUCKETS:
+        asyncio.create_task(_capture_bucket(b))  # do NOT await
 
 # -------- FastAPI app & queue ----------
 app = FastAPI()
@@ -241,7 +262,10 @@ async def _batcher():
                     batch_b = pad
                 else:
                     batch_b = batch
-                inp["input_values"].copy_(batch_b)
+                
+                # make sure the tensor you copy into static input matches captured dtype
+                copy_src = batch_b if DTYPE == torch.float32 else batch_b.to(dtype=DTYPE)
+                inp["input_values"].copy_(copy_src)
                 inp["attention_mask"].fill_(1)
                 g.replay()
                 logits = logits_ref[:depth]
@@ -251,7 +275,7 @@ async def _batcher():
                 if _ACTIVE_MODEL is None:
                     _build_eager_if_needed()
                     asyncio.create_task(_compile_in_background())
-                    asyncio.create_task(_capture_all_buckets())
+                    _kickoff_all_captures()
 
                 m = _ACTIVE_MODEL
                 logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
