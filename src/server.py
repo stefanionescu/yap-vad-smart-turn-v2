@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from fastapi import FastAPI, Request, HTTPException
 from loguru import logger
-from transformers import AutoProcessor, AutoModelForAudioClassification
+from transformers import AutoProcessor, Wav2Vec2ForEndpointing
 from pathlib import Path
 
 from .constants import (
@@ -39,7 +39,7 @@ torch.set_num_threads(2)
 # -----------------------------
 logger.info(f"Loading model and processor: {MODEL_ID}")
 processor = AutoProcessor.from_pretrained(MODEL_ID)
-model = AutoModelForAudioClassification.from_pretrained(MODEL_ID)
+model = Wav2Vec2ForEndpointing.from_pretrained(MODEL_ID)
 model.eval().to(DEVICE)
 if DTYPE != torch.float32 and DEVICE.type == "cuda":
     model.to(dtype=DTYPE)

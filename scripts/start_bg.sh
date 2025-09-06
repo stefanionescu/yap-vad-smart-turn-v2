@@ -18,7 +18,6 @@ fi
 source venv/bin/activate
 
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf}"
-export TRANSFORMERS_CACHE="$HF_HOME"
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"

@@ -163,7 +163,7 @@ bash scripts/stop.sh
 - Full purge (remove venv, caches, HF weights, logs; keep repo/system deps):
 
 ```bash
-bash scripts/stop.sh --purge
+bash scripts/stop.sh --purge --deep
 ```
 
 

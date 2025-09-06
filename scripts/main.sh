@@ -40,20 +40,9 @@ bash "$SCRIPT_DIR/tail_bg_logs.sh" &
 echo $! > "$RUN_DIR/tail.pid"
 
 # Wait for readiness
-# Wait for TCP listen, then HTTP health
-echo -n "[main] Waiting for TCP 0.0.0.0:8000 to listen"
-for i in $(seq 1 120); do
-  if ss -lnt | grep -q ':8000 '; then
-    echo " ✔"
-    break
-  fi
-  sleep 1
-  [ $i -eq 120 ] && { echo " ✖ timed out"; exit 3; }
-done
-
 echo -n "[main] Waiting for HTTP health"
 for i in $(seq 1 120); do
-  if curl -fsS http://127.0.0.1:8000/health >/dev/null; then
+  if curl -fsS --retry 0 --max-time 1 http://127.0.0.1:8000/health >/dev/null; then
     echo " ✔"
     break
   fi
