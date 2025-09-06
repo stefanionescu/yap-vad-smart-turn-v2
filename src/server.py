@@ -123,49 +123,58 @@ async def _batcher():
 
         t0_inf = time.perf_counter()
 
-        if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
-            if bucket in graphs and batch.shape[0] == bucket:
-                # fast path: replay captured graph
-                g, logits_ref, inp = graphs[bucket]
-                inp["input_values"].copy_(batch)
+        try:
+            if USE_CUDA_GRAPHS and DEVICE.type == "cuda":
+                # pad to bucket size, keep actual depth separately
+                if batch.shape[0] < bucket:
+                    pad = torch.zeros((bucket, batch.shape[1]), dtype=batch.dtype, device=batch.device)
+                    pad[: batch.shape[0]].copy_(batch)
+                    batch_b = pad
+                else:
+                    batch_b = batch
+
+                if bucket in graphs:
+                    g, logits_ref, inp = graphs[bucket]
+                else:
+                    # first time for this bucket: capture
+                    x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
+                    inp = processor(
+                        x, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+                        max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
+                    )
+                    inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
+                    g = torch.cuda.CUDAGraph()
+                    torch.cuda.synchronize()
+                    with torch.cuda.graph(g):
+                        out = model(**inp)
+                        logits_ref = out.logits
+                    graphs[bucket] = (g, logits_ref, inp)
+
+                # replay with real (padded) batch
+                inp["input_values"].copy_(batch_b)
                 g.replay()
                 logits = logits_ref
             else:
-                # lazy capture for this bucket, then replay with the real batch
-                x = torch.zeros((bucket, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
                 inp = processor(
-                    x,
-                    sampling_rate=SAMPLE_RATE,
-                    padding="max_length",
-                    truncation=True,
-                    max_length=MAX_SAMPLES,
-                    return_attention_mask=True,
-                    return_tensors="pt",
+                    batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+                    max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
                 )
                 inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-                g = torch.cuda.CUDAGraph()
-                torch.cuda.synchronize()
-                with torch.cuda.graph(g):
-                    out = model(**inp)
-                    logits_ref = out.logits
-                graphs[bucket] = (g, logits_ref, inp)
-                # now plug real batch and replay
-                inp["input_values"].copy_(batch)
-                g.replay()
-                logits = logits_ref
-        else:
-            # Tokenize per batch (CPU-bound but lightweight)
+                with torch.no_grad():
+                    if DEVICE.type == "cuda" and DTYPE != torch.float32:
+                        with torch.autocast("cuda", dtype=DTYPE):
+                            out = model(**inp)
+                    else:
+                        out = model(**inp)
+                logits = out.logits
+        except Exception as e:
+            # Never leave futures hanging: fall back to no-graphs path for this micro-batch
+            logger.exception(f"Batcher exception (depth={depth}, bucket={bucket}); falling back: {e}")
             inp = processor(
-                batch,
-                sampling_rate=SAMPLE_RATE,
-                padding="max_length",
-                truncation=True,
-                max_length=MAX_SAMPLES,
-                return_attention_mask=True,
-                return_tensors="pt",
+                batch, sampling_rate=SAMPLE_RATE, padding="max_length", truncation=True,
+                max_length=MAX_SAMPLES, return_attention_mask=True, return_tensors="pt",
             )
             inp = {k: v.to(DEVICE, non_blocking=True) for k, v in inp.items()}
-
             with torch.no_grad():
                 if DEVICE.type == "cuda" and DTYPE != torch.float32:
                     with torch.autocast("cuda", dtype=DTYPE):
@@ -175,7 +184,7 @@ async def _batcher():
             logits = out.logits
 
         # logits → probs
-        probs = logits.detach().float().cpu().numpy().reshape(-1)
+        probs = logits.detach().float().cpu().numpy().reshape(-1)[:depth]
 
         t1_inf = time.perf_counter()
 

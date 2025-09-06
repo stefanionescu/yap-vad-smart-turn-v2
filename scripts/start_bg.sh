@@ -14,6 +14,9 @@ export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONPATH="$ROOT_DIR"
+export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8,16,32,64}"
+export TORCH_COMPILE="${TORCH_COMPILE:-1}"
+export CUDA_GRAPHS="${CUDA_GRAPHS:-1}"
 
 PORT=8000
 echo "[start_bg] Launching on port ${PORT}"
