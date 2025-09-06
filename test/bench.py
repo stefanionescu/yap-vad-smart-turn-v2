@@ -10,7 +10,7 @@ from .utils import load_audio_from_samples
 
 def parse_args():
     p = argparse.ArgumentParser(description="Benchmark Smart Turn server")
-    p.add_argument("--auth", default=os.environ.get("AUTH_KEY", "dev"))
+    p.add_argument("--auth", default=os.environ.get("AUTH_KEY", ""))
     p.add_argument("--sample", default="mid.wav", help="sample file name under samples/ (.wav/.npy)")
     p.add_argument("--seconds", type=int, default=8)
     p.add_argument("--requests", type=int, default=128, help="total number of requests")
