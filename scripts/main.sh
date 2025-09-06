@@ -45,11 +45,12 @@ sleep 30
 echo " done."
 
 echo -n "[main] Health probe -> "
-if curl -fsS --max-time 2 http://127.0.0.1:8000/health >/dev/null; then
-  echo "✔"
-else
-  echo "✖"; echo "[main] Last 120 lines of server log:"; tail -n 120 logs/server.log; exit 3
-fi
+for i in {1..60}; do
+  if curl -fsS --max-time 1 http://127.0.0.1:8000/health >/dev/null; then
+    echo "✔"; break
+  fi
+  sleep 1
+done || { echo "✖"; tail -n 120 logs/server.log; exit 3; }
 
 if [[ $DO_WARMUP -eq 1 ]]; then
   echo "[main] Warmup using sample=$SAMPLE seconds=$SECONDS_PAD"

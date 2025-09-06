@@ -1,5 +1,5 @@
 # src/server.py
-import os, io, time, asyncio
+import os, io, time, asyncio, threading
 from typing import List
 
 import numpy as np
@@ -101,40 +101,42 @@ def _build_eager_if_needed():
         _ACTIVE_MODEL = _EAGER_MODEL
         logger.info("Eager model built and set ACTIVE.")
 
-async def _compile_in_background():
-    """Compile a separate model and warm it once, then atomically swap it in."""
+def _compile_sync():
+    """Sync compiler that runs off the event loop thread"""
     global _COMPILED_MODEL, _ACTIVE_MODEL, _COMPILED_READY
-    if not USE_TORCH_COMPILE or DEVICE.type != "cuda":
-        logger.info("torch.compile disabled or no CUDA; skipping compile.")
+    if _COMPILED_READY or DEVICE.type != "cuda" or not USE_TORCH_COMPILE:
         return
     try:
-        logger.info("Background: building compiled model...")
+        logger.info("Compile(thread): building compiled model...")
         m = Wav2Vec2ForEndpointing.from_pretrained(MODEL_ID).to(DEVICE)
         if DTYPE != torch.float32:
             m = m.to(dtype=DTYPE)
         m.eval()
         m = torch.compile(m, mode="reduce-overhead")
 
-        # 🔥 Pre-warm all buckets so no runtime recompiles
+        # Pre-warm the exact buckets we'll use
         for b in sorted(set(BATCH_BUCKETS)):
-            logger.info(f"Background: warm compile for batch={b}")
             warm = torch.zeros((b, MAX_SAMPLES), dtype=torch.float32, device=DEVICE)
-            inp = _make_inputs_gpu(warm, cast_to=(DTYPE if DTYPE != torch.float32 else None))
+            inp = _make_inputs_gpu(
+                warm, cast_to=(DTYPE if DTYPE != torch.float32 else None)
+            )
             with torch.no_grad():
                 if DEVICE.type == "cuda" and DTYPE != torch.float32:
                     with torch.autocast("cuda", dtype=DTYPE):
                         _ = m(**inp)
                 else:
                     _ = m(**inp)
-            if DEVICE.type == "cuda":
-                torch.cuda.synchronize()
+
+        if DEVICE.type == "cuda":
+            torch.cuda.synchronize()
 
         _COMPILED_MODEL = m
         _COMPILED_READY = True
         _ACTIVE_MODEL = _COMPILED_MODEL
-        logger.info("Background: compiled model is READY and ACTIVE.")
+        logger.info("Compile(thread): READY and ACTIVE.")
     except Exception as e:
-        logger.exception(f"Background compile failed: {e}")
+        logger.exception(f"Compile(thread) failed: {e}")
+
 
 
 # -------- FastAPI app & queue ----------
@@ -192,7 +194,6 @@ async def _batcher():
             # compiled or eager
             if _ACTIVE_MODEL is None:
                 _build_eager_if_needed()
-                asyncio.create_task(_compile_in_background())
 
             m = _ACTIVE_MODEL
             logger.debug(f"batcher: eager/compiled forward bucket={bucket} (compiled_ready={_COMPILED_READY})")
@@ -246,9 +247,9 @@ async def _batcher():
 async def _on_start():
     logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
     asyncio.create_task(_batcher())
-    
-    # 🔥 Start compilation at startup so first request is also fast
-    asyncio.create_task(_compile_in_background())
+
+    # ⬇️ start compile in a daemon thread so the event loop isn't blocked
+    threading.Thread(target=_compile_sync, daemon=True).start()
 
     # mark ready file
     try:
