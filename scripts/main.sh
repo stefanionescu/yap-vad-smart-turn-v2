@@ -40,8 +40,8 @@ bash "$SCRIPT_DIR/tail_bg_logs.sh" &
 echo $! > "$RUN_DIR/tail.pid"
 
 # Wait once, not a loop
-echo -n "[main] Waiting 15s before first health probe..."
-sleep 15
+echo -n "[main] Waiting 30s before first health probe..."
+sleep 30
 echo " done."
 
 echo -n "[main] Health probe -> "
