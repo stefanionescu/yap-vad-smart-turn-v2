@@ -44,7 +44,7 @@ def parse_buckets(val: str) -> list[int]:
         return [1, 2, 4, 8]  # Default to smaller buckets to avoid OOM
 
 
-BATCH_BUCKETS = parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,8"))
+BATCH_BUCKETS = parse_buckets(os.environ.get("BATCH_BUCKETS", "1,2,4,6"))
 USE_TORCH_COMPILE = os.environ.get("TORCH_COMPILE", "1") == "1"
 
 

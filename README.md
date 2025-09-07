@@ -4,7 +4,7 @@ FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching
 
 ### Why this setup
 
-- **Fast**: micro-batches with smart bucket sizes (1,2,4,8) and 5ms window, uses pinned memory and `torch.compile`. Designed for 8–16s mono 16kHz PCM.
+- **Fast**: micro-batches with smart bucket sizes (1,2,4,6) and 5ms window, uses pinned memory and `torch.compile`. Designed for 8–16s mono 16kHz PCM.
 - **Efficient**: Async queue-based batching with eager→compiled model swapping. No blocking waits.
 - **Simple**: no Docker required. Works well on Runpod dedicated L40S (CUDA 12.8 drivers are compatible with PyTorch cu124 wheels).
 - **Compatible**: exact Pipecat HTTP analyzer format.
@@ -65,7 +65,7 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
 ## Environment variables
 
 - `AUTH_KEY` (optional): If set, server requires `Authorization: Key <AUTH_KEY>`.
-- `BATCH_BUCKETS` (default `1,2,4,8`): Comma-separated micro-batch sizes.
+- `BATCH_BUCKETS` (default `1,2,4,6`): Comma-separated micro-batch sizes.
 - `MICRO_BATCH_WINDOW_MS` (default `5`): Batching window in milliseconds.
 - `DTYPE` (`bfloat16` or `float32`, default `bfloat16`): Compute dtype.
 - `THRESHOLD` (default `0.5`): Decision threshold over probability.
@@ -89,6 +89,8 @@ Ensure venv is active or run after `scripts/main.sh`.
 
 ```bash
 bash scripts/setup.sh
+bash scripts/start_bg.sh
+sleep 120
 source .venv/bin/activate
 ```
 
@@ -196,14 +198,14 @@ batch = batch.pin_memory().to(DEVICE, non_blocking=True)
 
 1. **Eager Model**: Loads immediately on first request for fast startup
 2. **Background Compilation**: `torch.compile()` runs in parallel with serving  
-3. **Pre-warming**: All batch sizes (1,2,4,8) are compiled upfront to prevent runtime JIT stalls
+3. **Pre-warming**: All batch sizes (1,2,4,6) are compiled upfront to prevent runtime JIT stalls
 4. **Atomic Swap**: Once compiled model is warmed up, switches `_ACTIVE_MODEL`
 5. **Resilient**: Compilation failures don't crash server, falls back to eager
 
 ### What's Different from Typical Setups
 
 - **No CUDA Graphs**: Removed for stability - torch.compile provides sufficient optimization
-- **Small Batch Buckets**: (1,2,4,8) instead of (16,32,64) to prevent GPU OOM on L40S  
+- **Small Batch Buckets**: (1,2,4,6) instead of (16,32,64) to prevent GPU OOM on L40S  
 - **Async Queue Architecture**: Non-blocking requests with futures, no threading complexity
 - **Atomic Model Swapping**: Smooth eager→compiled transition without request interruption
 - **Expandable Memory Segments**: Better CUDA memory management vs default PyTorch allocator
@@ -212,7 +214,7 @@ batch = batch.pin_memory().to(DEVICE, non_blocking=True)
 
 ## Tuning
 
-- Default configuration uses `MICRO_BATCH_WINDOW_MS=5`, `BATCH_BUCKETS=1,2,4,8` (stable, smaller buckets to avoid OOM).
+- Default configuration uses `MICRO_BATCH_WINDOW_MS=5`, `BATCH_BUCKETS=1,2,4,6` (stable, smaller buckets to avoid OOM).
 - Prefer `DTYPE=bfloat16` on L40S; switch to `float32` for accuracy validation.
 - Keep a single worker process; model is loaded once.
 - See "Production Deployment" section below for detailed performance tuning options.
@@ -284,7 +286,7 @@ For production use, follow this hygiene checklist:
 These are the tested, stable defaults (already set in the scripts):
 
 ```bash
-export BATCH_BUCKETS="1,2,4,8"          # Small buckets to avoid OOM
+export BATCH_BUCKETS="1,2,4,6"           # Small buckets to avoid OOM
 export TORCH_COMPILE=1                   # Enables torch.compile optimization
 export CUDA_GRAPHS=0                     # CUDA graphs disabled (cleaned up)
 export DTYPE=bfloat16                    # Optimal for L40S/modern GPUs

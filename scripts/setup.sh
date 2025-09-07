@@ -40,7 +40,7 @@ mkdir -p logs .hf .run samples
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf}"
 unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
-export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
+export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,6}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export DTYPE="${DTYPE:-bfloat16}"
 export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"

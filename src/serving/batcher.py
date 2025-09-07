@@ -36,17 +36,35 @@ def _select_bucket(depth: int) -> int:
 
 
 async def batcher() -> None:
-    """Periodic micro-batcher that drains the queue and performs a single forward pass."""
+    """Event-driven micro-batcher. Coalesces briefly, then runs immediately.
+
+    Coalescing window is bounded by MICRO_BATCH_WINDOW_MS. If the queue already
+    has items, they are drained without waiting to minimize per-batch gaps under load.
+    """
     await asyncio.sleep(0)
 
-    while True:
-        await asyncio.sleep(MICRO_BATCH_WINDOW_MS / 1000.0)
+    max_bucket = max(rt.BATCH_BUCKETS)
 
-        items: List[Item] = []
-        while not QUEUE.empty() and len(items) < max(rt.BATCH_BUCKETS):
-            items.append(QUEUE.get_nowait())
-        if not items:
-            continue
+    while True:
+        # Block for the first item to arrive
+        first: Item = await QUEUE.get()
+        items: List[Item] = [first]
+
+        # Coalesce additional items up to the bucket size or until window expires
+        deadline = time.perf_counter() + (MICRO_BATCH_WINDOW_MS / 1000.0)
+        while len(items) < max_bucket:
+            # If more items are already queued, drain immediately
+            if not QUEUE.empty():
+                items.append(QUEUE.get_nowait())
+                continue
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                break
+            try:
+                nxt: Item = await asyncio.wait_for(QUEUE.get(), timeout=remaining)
+                items.append(nxt)
+            except asyncio.TimeoutError:
+                break
 
         depth = len(items)
         bucket = _select_bucket(depth)

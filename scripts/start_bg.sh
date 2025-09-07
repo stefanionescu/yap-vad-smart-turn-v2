@@ -12,7 +12,7 @@ unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
 
 # Minimal tunables used by the app; others use defaults
-export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
+export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,6}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
 export DTYPE="${DTYPE:-bfloat16}"
 export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
