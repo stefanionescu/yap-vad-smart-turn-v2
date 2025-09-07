@@ -10,16 +10,16 @@ from fastapi import FastAPI
 
 from ..serving.batcher import batcher
 from ..api.routes import health, status, raw
-from ..runtime.runtime import logger, BATCH_BUCKETS, DTYPE, DEVICE, compile_sync
+from ..runtime import runtime as rt
 
 
 async def on_start() -> None:
     """Startup hook: spawn batcher, kick off compile, and write readiness file."""
-    logger.info(f"Smart Turn v2 server | device={DEVICE} dtype={DTYPE} buckets={BATCH_BUCKETS}")
+    rt.logger.info(f"Smart Turn v2 server | device={rt.DEVICE} dtype={rt.DTYPE} buckets={rt.BATCH_BUCKETS}")
     asyncio.create_task(batcher())
 
     # Start compile in a daemon thread so the event loop isn't blocked
-    threading.Thread(target=compile_sync, daemon=True).start()
+    threading.Thread(target=rt.compile_sync, daemon=True).start()
 
     # Mark ready file
     try:
@@ -27,8 +27,8 @@ async def on_start() -> None:
         run_dir = root / ".run"; run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "ready").write_text("ok", encoding="utf-8")
     except Exception as e:
-        logger.warning(f"Failed to write readiness file: {e}")
-    logger.info("Smart Turn v2 server ready (startup tasks scheduled).")
+        rt.logger.warning(f"Failed to write readiness file: {e}")
+    rt.logger.info("Smart Turn v2 server ready (startup tasks scheduled).")
 
 
 def create_app() -> FastAPI:
