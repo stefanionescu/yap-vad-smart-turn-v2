@@ -61,6 +61,15 @@ if [[ $DO_WARMUP -eq 1 ]]; then
     --timeout 180
 fi
 
+# Stop tailer cleanly before exiting
+if [ -f "$RUN_DIR/tail.pid" ]; then
+  TAILPID="$(cat "$RUN_DIR/tail.pid" || echo)"
+  if [ -n "$TAILPID" ] && kill -0 "$TAILPID" 2>/dev/null; then
+    kill "$TAILPID" || true
+  fi
+  rm -f "$RUN_DIR/tail.pid"
+fi
+
 echo "[main] Done. Logs: $ROOT_DIR/logs/server.log"
 
 

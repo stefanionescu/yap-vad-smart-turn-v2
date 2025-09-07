@@ -7,7 +7,14 @@ from typing import Optional
 import aiohttp
 import numpy as np
 
-from .utils import load_audio_from_samples
+try:
+    # When invoked as a module: python -m test.throughput
+    from .utils import load_audio_from_samples  # type: ignore
+except ImportError:
+    # When invoked as a script: python test/throughput.py
+    import os, sys
+    sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+    from test.utils import load_audio_from_samples
 
 
 async def _worker(name: int, url: str, headers: dict, payload: bytes, stop_at: float, success: list[int], fail: list[int], latencies_s: list[float]) -> None:
