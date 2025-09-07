@@ -230,6 +230,20 @@ batch = batch.pin_memory().to(DEVICE, non_blocking=True)
 
 ---
 
+## Performance
+
+Example results from a recent run with the default configuration:
+
+| Scenario | Settings | Results |
+|---|---|---|
+| Throughput (sustained) | duration=60s, concurrency=4, sample=mid.wav, seconds=8 | success=11486, fail=0, 191.43 rps, p50=20.6ms, p95=22.9ms |
+| Bench (short burst) | total=4, concurrency=4 | p50=31.8ms, p95=31.8ms |
+| Warmup (single request) | seconds=8 | inference_time≈10.1ms, total_time≈15.8ms |
+
+Notes:
+- Numbers will vary by hardware, driver, and load. Use `test/throughput.py` and `test/bench.py` to reproduce on your setup. In our case, we ran the tests on an L40S.
+- The batcher is event-driven; tuning `MICRO_BATCH_WINDOW_MS` and `BATCH_BUCKETS` affects latency vs throughput trade-offs.
+
 ## Code Structure
 
 ```
