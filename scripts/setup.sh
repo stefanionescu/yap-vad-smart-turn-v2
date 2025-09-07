@@ -74,8 +74,8 @@ else:
 PY
 
 echo "[setup] Complete. Activate with: source .venv/bin/activate"
-echo "[setup] Defaults: BATCH_BUCKETS=$BATCH_BUCKETS, TORCH_COMPILE=$TORCH_COMPILE, CUDA_GRAPHS=$CUDA_GRAPHS"
-echo "[setup]           DTYPE=$DTYPE, MICRO_BATCH_WINDOW_MS=$MICRO_BATCH_WINDOW_MS"
+echo "[setup] Defaults: BATCH_BUCKETS=$BATCH_BUCKETS, TORCH_COMPILE=$TORCH_COMPILE"
+echo "[setup]           DTYPE=$DTYPE, MICRO_BATCH_WINDOW_MS=$MICRO_BATCH_WINDOW_MS, LOG_LEVEL=$LOG_LEVEL"
 
 
 
