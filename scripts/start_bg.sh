@@ -6,25 +6,21 @@ mkdir -p "$ROOT_DIR/.run" "$ROOT_DIR/logs"
 
 source "$ROOT_DIR/.venv/bin/activate"
 
+export PYTHONPATH="$ROOT_DIR"
 export HF_HOME="${HF_HOME:-$ROOT_DIR/.hf}"
 unset TRANSFORMERS_CACHE
 export HUGGINGFACE_HUB_CACHE="$HF_HOME"
-export OMP_NUM_THREADS="${OMP_NUM_THREADS:-2}"
-export MKL_NUM_THREADS="${MKL_NUM_THREADS:-2}"
-export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
-export TOKENIZERS_PARALLELISM=false
-export PYTHONPATH="$ROOT_DIR"
+
+# Minimal tunables used by the app; others use defaults
 export BATCH_BUCKETS="${BATCH_BUCKETS:-1,2,4,8}"
 export TORCH_COMPILE="${TORCH_COMPILE:-1}"
-export CUDA_GRAPHS="${CUDA_GRAPHS:-0}"
 export DTYPE="${DTYPE:-bfloat16}"
 export MICRO_BATCH_WINDOW_MS="${MICRO_BATCH_WINDOW_MS:-5}"
-export LOG_LEVEL="${LOG_LEVEL:-DEBUG}"
+export LOG_LEVEL="${LOG_LEVEL:-INFO}"
 
 PORT=8000
 echo "[start_bg] Launching on port ${PORT}"
 
-# 🔑 keep it simple: NO uvloop/httptools while we debug the bind
 nohup python -m uvicorn src.server:app \
   --host 0.0.0.0 \
   --port "$PORT" \

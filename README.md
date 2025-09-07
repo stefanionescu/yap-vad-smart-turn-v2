@@ -1,4 +1,4 @@
-## Yap Smart Turn
+## Yap VAD Smart Turn
 
 FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching on NVIDIA L40S. Same wire format as Pipecat's `HttpSmartTurnAnalyzer`: POST `/raw` with `np.save` bytes → JSON `{prediction, probability, metrics}`.
 
@@ -223,38 +223,48 @@ batch = batch.pin_memory().to(DEVICE, non_blocking=True)
 
 ```
 src/
-├── server.py          # Main FastAPI server with batching logic
-├── constants.py       # Configuration constants and environment parsing  
-└── model.py          # Custom Wav2Vec2ForEndpointing model class
+├── server.py              # Thin entrypoint (uvicorn src.server:app)
+├── app/
+│   └── factory.py         # FastAPI app factory + startup hook
+├── api/
+│   └── routes.py          # /health, /status, /raw
+├── serving/
+│   └── batcher.py         # Item, QUEUE, batcher() loop
+├── runtime/
+│   └── runtime.py         # Logger, device/dtype, buckets, compile, inputs
+├── utils/
+│   ├── audio.py           # ensure_16k()
+│   └── auth.py            # auth_ok()
+├── constants.py           # Config constants and env parsing
+└── model.py               # Custom Wav2Vec2ForEndpointing model class
 
 scripts/
-├── main.sh           # One-command setup → start → warmup
-├── setup.sh          # Install venv, PyTorch, model weights
-├── start.sh          # Foreground server start
-├── start_bg.sh       # Background server start  
-├── stop.sh           # Stop server, optional cleanup
-└── tail_bg_logs.sh   # Follow server logs
+├── main.sh                # One-command setup → start(bg) → warmup
+├── setup.sh               # Install venv, PyTorch, model weights
+├── start_bg.sh            # Background server start
+├── stop.sh                # Stop server, optional cleanup
+└── tail_bg_logs.sh        # Follow server logs
 
 test/
-├── warmup.py         # Single request warmup utility
-├── bench.py          # Load testing with concurrency
-├── client.py         # Test client with .env config
-└── utils.py          # Shared test utilities
+├── warmup.py              # Single request warmup utility
+├── bench.py               # Load testing with concurrency
+├── client.py              # Test client with .env config
+└── utils.py               # Shared test utilities
 ```
 
 ### Key Files Explained
 
-- **`server.py`**: Contains the entire server logic including:
-  - Async queue-based micro-batching (`_batcher()`)
-  - Model loading and compilation management
-  - FastAPI routes (`/raw`, `/health`, `/status`)  
-  - Audio preprocessing and GPU memory management
+- **`server.py`**: Thin entrypoint exposing `app` from `app.factory.create_app()` for `uvicorn src.server:app`.
+- **`app/factory.py`**: FastAPI app factory, startup hook (starts batcher, triggers compile, writes readiness).
+- **`api/routes.py`**: Route handlers for `/raw`, `/health`, `/status`.
+- **`serving/batcher.py`**: Async queue (`QUEUE`), request `Item`, and `batcher()` loop.
+- **`runtime/runtime.py`**: Logger, device/dtype, buckets; `build_eager_if_needed`, `compile_sync`, `make_inputs_gpu`, `_ACTIVE_MODEL` state.
+- **`utils/audio.py`**: `ensure_16k()` input normalization.
+- **`utils/auth.py`**: `auth_ok()` header-based auth.
+- **`constants.py`**: Centralized configuration and environment parsing.
+- **`model.py`**: Custom Wav2Vec2 model class that adds the binary classification head for turn-taking detection.
 
-- **`constants.py`**: Centralized configuration with environment variable parsing for audio settings, model config, and batching parameters
-
-- **`model.py`**: Custom Wav2Vec2 model class that adds the binary classification head for turn-taking detection
-
-- **Scripts**: Production-ready deployment scripts with proper environment setup, background process management, and monitoring
+- **Scripts**: Deployment scripts for setup, background start, log tailing, and stop/cleanup.
 
 ---
 
