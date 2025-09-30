@@ -36,17 +36,16 @@ Defaults are set in scripts; no env needed for basic run. Health: `GET /health`.
   - Headers: `Content-Type: application/octet-stream`, optionally `Authorization: Key <AUTH_KEY>`
   - Body: raw `np.save` bytes of a `np.float32` mono PCM array at 16 kHz, duration 8–16 s.
   - Response JSON:
-
-```json
-{
-  "prediction": 0,
-  "probability": 0.123,
-  "metrics": {
-    "inference_time": 0.0123,
-    "total_time": 0.0189
-  }
-}
-```
+   ```json
+   {
+     "prediction": 0,
+     "probability": 0.123,
+     "metrics": {
+       "inference_time": 0.0123,
+       "total_time": 0.0189
+     }
+   }
+   ```
 
 - `GET /health` → `{ "ok": true }`
 - `GET /status` → Server diagnostics:
