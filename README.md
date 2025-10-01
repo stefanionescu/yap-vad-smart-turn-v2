@@ -1,4 +1,4 @@
-## Yap VAD Smart Turn
+# Yap VAD Smart Turn
 
 FastAPI server for `pipecat-ai/smart-turn-v2` with CUDA-efficient micro-batching on NVIDIA L40S. Same wire format as Pipecat's `HttpSmartTurnAnalyzer`: POST `/raw` with `np.save` bytes → JSON `{prediction, probability, metrics}`.
 
